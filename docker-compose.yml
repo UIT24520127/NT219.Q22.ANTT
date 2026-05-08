@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # 1. Cơ sở dữ liệu lưu CEK và Audit Log (Phụ trách bởi Người A)
+  db:
+    image: mariadb:10.11
+    container_name: drm_mariadb
+    ports:
+      - "3306:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: drm_system
+    volumes:
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # 2. OpenBao - Quản lý khóa (KMS)
+  openbao:
+    image: quay.io/openbao/openbao:2.0
+    container_name: drm_kms
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: "root-token" # Chỉ dùng cho môi trường dev
+      BAO_ADDR: "http://0.0.0.0:8200"
+    command: server -dev
+
+  # 3. Keycloak - Xác thực WebAuthn (Phụ trách bởi Người A)
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: drm_auth
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+
+  # 4. OPA - Kiểm tra quyền hạn (Policy)
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: drm_opa
+    ports:
+      - "8181:8181"
+    command: "run --server"
