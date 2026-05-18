@@ -28,6 +28,8 @@ secure-player-root/                     # Thư mục gốc dự án trên GitHub
 ├── security/                           # ZONE 3: SECURITY ZONE
 │   ├── openbao/                        # Cấu hình OpenBao KMS (Auto-unseal qua OCI KMS)
 │   └── watermark/                      # Script nhúng dấu vết sóng âm A/B Switching
+│   └── opa/
+		└── policies/
 │
 └── data/                               # ZONE 3: DATA STORAGE ZONE (Vùng tối - No Public IP)
     ├── database/                       #
