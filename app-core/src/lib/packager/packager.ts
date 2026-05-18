@@ -1,0 +1,215 @@
+import { exec, execFile } from 'child_process';
+import { promisify } from 'util';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
+import path from 'path';
+import { kmsService } from '../kms/bao';
+
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// Cấu hình đường dẫn output
+const AUDIO_SEGMENTS_DIR = process.env.AUDIO_SEGMENTS_DIR || '/audio/segments';
+const AUDIO_MANIFESTS_DIR = process.env.AUDIO_MANIFESTS_DIR || '/audio/manifests';
+const AUDIO_METADATA_DIR = process.env.AUDIO_METADATA_DIR || '/audio/metadata';
+
+// Widevine configuration
+const WIDEVINE_PROVIDER_URL = process.env.WIDEVINE_PROVIDER_URL || 'https://license.widevine.com/cenc/getcontentkey/widevine_test';
+
+/**
+ * Ensure output directories exist
+ */
+const ensureDirectories = () => {
+  [AUDIO_SEGMENTS_DIR, AUDIO_MANIFESTS_DIR, AUDIO_METADATA_DIR].forEach(dir => {
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+  });
+};
+
+/**
+ * Decrypt CEK in-memory for Shaka Packager invocation
+ * @param encryptedCek Ciphertext from OpenBao (vault:v1:...)
+ * @returns Plaintext CEK in hex format
+ */
+const decryptCEKForPackaging = async (encryptedCek: string): Promise<string> => {
+  try {
+    const plaintext = await kmsService.decryptKey(encryptedCek);
+    // Ensure it's in hex format (64 characters for 256-bit key)
+    if (plaintext.length === 64 && /^[0-9a-f]+$/.test(plaintext)) {
+      return plaintext;
+    }
+    throw new Error('CEK not in valid hex format');
+  } catch (error: any) {
+    console.error('❌ [Packager] Failed to decrypt CEK:', error.message);
+    throw new Error('CEK Decryption Failed');
+  }
+};
+
+/**
+ * Extract audio metadata using ffprobe
+ * @param inputPath Path to input audio file
+ */
+const extractMediaMetadata = async (inputPath: string) => {
+  try {
+    const ffprobe = require('ffprobe-static');
+    const { stdout } = await execFileAsync(ffprobe.path, [
+      '-v', 'error',
+      '-show_format',
+      '-show_streams',
+      '-print_json',
+      inputPath
+    ]);
+    return JSON.parse(stdout);
+  } catch (error: any) {
+    console.error('❌ [Packager] ffprobe error:', error.message);
+    throw new Error('Failed to extract media metadata');
+  }
+};
+
+/**
+ * Main packaging function: encrypt audio with Shaka Packager and generate DASH/MPD
+ * @param inputPath Full path to input AAC/M4A file
+ * @param trackId Unique track identifier (UUID)
+ * @param kid Key ID (16 bytes hex string)
+ * @param encryptedCek Encrypted CEK from OpenBao (vault:v1:...)
+ * @returns Object with paths to generated MPD and segments
+ */
+export const encryptAndPackageMedia = async (
+  inputPath: string,
+  trackId: string,
+  kid: string,
+  encryptedCek: string
+) => {
+  try {
+    ensureDirectories();
+
+    console.log(`📦 [Packager] Starting packaging for track: ${trackId}`);
+    console.log(`🔑 [Packager] KID: ${kid}`);
+
+    // Step 1: Extract media metadata
+    console.log('📊 [Packager] Extracting media metadata...');
+    const mediaInfo = await extractMediaMetadata(inputPath);
+    const duration = Math.ceil(parseFloat(mediaInfo.format.duration || '0'));
+    const bitrate = mediaInfo.format.bit_rate || '128000';
+
+    console.log(`⏱️  [Packager] Duration: ${duration}s, Bitrate: ${bitrate}bps`);
+
+    // Step 2: Decrypt CEK for packaging
+    console.log('🔓 [Packager] Decrypting CEK...');
+    const plaintextCek = await decryptCEKForPackaging(encryptedCek);
+
+    // Step 3: Prepare output paths
+    const outputDir = path.join(AUDIO_SEGMENTS_DIR, trackId);
+    const mpdPath = path.join(AUDIO_MANIFESTS_DIR, `${trackId}.mpd`);
+    const metadataPath = path.join(AUDIO_METADATA_DIR, `${trackId}.json`);
+
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+
+    // Step 4: Build Shaka Packager command
+    // Format: packager input=<file>,stream=audio,output=<output.mp4>,drm_label=<label>
+    //         --enable_widevine_encryption
+    //         --key_server_url=<url>
+    //         --encryption_key=<kid>:<key>
+    //         --mpd_output=<mpd>
+
+    const packagerCmd = [
+      'packager',
+      `input=${inputPath},stream=audio,output=${path.join(outputDir, 'segment.mp4')},drm_label=audio`,
+      '--enable_widevine_encryption',
+      `--key_server_url=${WIDEVINE_PROVIDER_URL}`,
+      `--encryption_key=${kid}:${plaintextCek}`,
+      `--mpd_output=${mpdPath}`,
+      '--generate_static_mpd'
+    ];
+
+    console.log('🚀 [Packager] Executing Shaka Packager...');
+    console.log(`Command: ${packagerCmd.join(' ')}`);
+
+    // Execute Shaka Packager
+    try {
+      const { stdout, stderr } = await execAsync(packagerCmd.join(' '));
+      if (stderr) console.log('⚠️  [Packager] stderr:', stderr);
+      console.log('✅ [Packager] Shaka Packager completed successfully');
+    } catch (error: any) {
+      // Shaka Packager might return exit code > 0 but still succeed, so we check for errors in output
+      if (error.message && error.message.includes('ERROR')) {
+        throw error;
+      }
+      console.log('⚠️  [Packager] Packager exited with code, but may have succeeded');
+    }
+
+    // Step 5: Verify MPD file was created
+    if (!existsSync(mpdPath)) {
+      throw new Error(`MPD file not created at ${mpdPath}`);
+    }
+
+    // Step 6: Read and parse MPD to verify KID
+    console.log('📋 [Packager] Verifying MPD structure...');
+    const mpdContent = readFileSync(mpdPath, 'utf-8');
+    
+    if (!mpdContent.includes('ContentProtection')) {
+      console.warn('⚠️  [Packager] Warning: MPD does not contain ContentProtection element');
+    }
+
+    if (!mpdContent.includes(kid)) {
+      console.warn(`⚠️  [Packager] Warning: KID ${kid} not found in MPD. This may need manual PSSH adjustment.`);
+    }
+
+    // Step 7: Save metadata for future reference
+    const metadata = {
+      trackId,
+      kid,
+      filename: path.basename(inputPath),
+      duration,
+      bitrate,
+      mpdPath,
+      segmentDir: outputDir,
+      createdAt: new Date().toISOString(),
+      mpdPreview: mpdContent.substring(0, 500) + '...' // First 500 chars for debugging
+    };
+
+    require('fs').writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    console.log(`💾 [Packager] Metadata saved to ${metadataPath}`);
+
+    console.log(`✨ [Packager] Packaging complete! MPD: ${mpdPath}`);
+
+    return {
+      success: true,
+      trackId,
+      kid,
+      mpdPath,
+      segmentDir: outputDir,
+      metadataPath,
+      duration,
+      bitrate,
+      message: 'Package created successfully'
+    };
+  } catch (error: any) {
+    console.error('❌ [Packager] Packaging failed:', error.message);
+    throw error;
+  }
+};
+
+/**
+ * Verify CENC encryption in generated segments
+ * Checks if segment contains proper CENC encryption box (sinf)
+ * @param segmentPath Path to .mp4 segment file
+ */
+export const verifyCENCEncryption = async (segmentPath: string): Promise<boolean> => {
+  try {
+    // Read first 1KB of segment to check for 'sinf' box (CENC metadata)
+    const buffer = readFileSync(segmentPath);
+    const hexContent = buffer.toString('hex');
+    
+    // 'sinf' in hex is 0x73696e66
+    const hasSinf = hexContent.includes('73696e66');
+    
+    console.log(hasSinf ? '✅ [Packager] CENC encryption verified' : '⚠️  [Packager] Warning: CENC box not found');
+    return hasSinf;
+  } catch (error: any) {
+    console.error('❌ [Packager] CENC verification error:', error.message);
+    return false;
+  }
+};
