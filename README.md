@@ -1,33 +1,36 @@
-project-root/
-├── .github/          	# GitHub Actions (CI/CD) để tự động build docker image
-├── docker-compose.yml	# File điều phối chính cho toàn bộ hệ thống
-├── .env              	# Lưu biến môi trường (Database password, KMS keys)
+secure-player-root/                     # Thư mục gốc dự án trên GitHub
+├── .github/workflows/                  # CI/CD tự động build Docker
+├── docker-compose.yml                  # File điều phối chính
+├── .env                                # CHỈ CHỨA: Endpoint, DB URL, non-sensitive config
 │
-├── ingest/           	# ZONE 4: MANAGEMENT (Xử lý nhạc đầu vào)
-│   ├── Dockerfile
-│   ├── scripts/          # Script chạy FFmpeg & Shaka Packager
-│   └── input/        	# Nhạc gốc chưa xử lý
+├── ingest/                             # ZONE 4: MANAGEMENT ZONE (Isolated)
+│   ├── input-temp/                     # Vùng đệm chứa file nhạc thô .mp3 chưa xử lý
+│   └── scripts/                        # Di chuyển thư mục 'scripts' cũ vào đây
+│       └── packager.sh                 # Script băm nhạc rồi đẩy thẳng lên Cloudflare R2
 │
-├── server/           	# ZONE 2: PRIVATE SUBNET (Backend logic)
-│   ├── Dockerfile
-│   ├── middleware/   	# Next.js Middleware & License Proxy
-│   ├── auth/         	# Cấu hình Keycloak/IdP
-│   └── policy/       	# Cấu hình Open Policy Agent (OPA)
+├── app-core/                           # ZONE 1 & 2: CỤM NEXT.JS FULL STACK (Bọc lại cho sạch)
+│   ├── src/
+│   │   └── app/
+│   │       ├── api/auth/               # Backend: Route xử lý Auth Keycloak
+│   │       ├── api/license/            # Backend: License Proxy (Xử lý Widevine Challenge)
+│   │       │   └── route.ts            #
+│   │       ├── login/                  # Frontend: Giao diện Đăng nhập
+│   │       └── player/                 # Frontend: Giao diện Trình phát nhạc (Shaka Player)
+│   │   └── lib/                        # Backend: Logic kết nối hạ tầng nhạy cảm
+│   │       ├── db/mariadb.ts           # Kết nối Database Pooling
+│   │       ├── kms/bao.ts              # Service gọi giải mã qua OpenBao
+│   │       └── storage/r2.ts           # Service tạo Signed URL kết nối Cloudflare R2
+│   ├── public/                         # Assets tĩnh của Web
+│   ├── package.json                    # Config dependencies của Next.js
+│   ├── next.config.mjs                 #
+│   └── tsconfig.json                   #
 │
-├── proxy/            	# ZONE 2: NGINX (Edge Cache)
-│   ├── Dockerfile
-│   └── nginx.conf    	# Cấu hình cache và giới hạn IP chỉ cho phép Private
+├── security/                           # ZONE 3: SECURITY ZONE
+│   ├── openbao/                        # Cấu hình OpenBao KMS (Auto-unseal qua OCI KMS)
+│   └── watermark/                      # Script nhúng dấu vết sóng âm A/B Switching
 │
-├── client/           	# ZONE 1: PUBLIC (Frontend)
-│   ├── Dockerfile
-│   ├── src/          	# Next.js Frontend + Shaka Player
-│   └── public/
-│
-├── security/         	# ZONE 3: SECURITY (KMS & Watermarking)
-│   ├── openbao/      	# Cấu hình OpenBao KMS
-│   └── watermark/    	# Script nhúng Audio Watermarking
-│
-└── data/             	# ZONE 3: DATABASE & STORAGE (Persistent Data)
-	├── mariadb/      	# Script khởi tạo SQL (Init.sql)
-	├── valkey/       	# Cấu hình Valkey Cache
-	└── storage/      	# Thư mục chứa các Encrypted Segments (.mpd, .m3u8)
+└── data/                               # ZONE 3: DATA STORAGE ZONE (Vùng tối - No Public IP)
+    ├── database/                       #
+    │   └── init.sql                    # Script tạo bảng tracks, audit_logs (Cập nhật đường dẫn)
+    ├── valkey/                         # Cấu hình bộ nhớ đệm Valkey (Chống Replay DPoP)
+    └── cache/                          # Chỉ làm vùng nhớ đệm temporary local-dev
