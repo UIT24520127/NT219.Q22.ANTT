@@ -22,8 +22,9 @@ services:
       - "8200:8200"
     environment:
       BAO_DEV_ROOT_TOKEN_ID: "root-token"
+      VAULT_DEV_ROOT_TOKEN_ID: "root-token"
       BAO_ADDR: "http://0.0.0.0:8200"
-    command: server -dev
+    command: server -dev -dev-root-token-id=root-token
 
   # 3. Keycloak - Xác thực WebAuthn
   keycloak:

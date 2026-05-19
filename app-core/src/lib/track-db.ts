@@ -1,5 +1,7 @@
 import db from './db';
 import { kmsService, generateKID, generateCEK } from './kms/bao';
+import { v4 as uuidv4 } from 'uuid';
+import type { Track, DASHManifest, AuditLog } from './types';
 
 /**
  * Create a new track record with encrypted CEK
@@ -16,7 +18,6 @@ export const createTrack = async (
   encrypted_cek: string;
 }> => {
   try {
-    const { v4: uuidv4 } = require('uuid');
     const trackId = uuidv4();
 
     // Generate random KID and CEK
@@ -27,20 +28,30 @@ export const createTrack = async (
     console.log(`🔐 [DB] Encrypting CEK for track ${trackId}...`);
     const encrypted_cek = await kmsService.encryptKey(cek);
 
-    // Insert into tracks table
+    // Insert into tracks table with retry logic for KID collisions
     const query = `
       INSERT INTO tracks (id, filename, kid, encrypted_cek, source_format)
       VALUES (?, ?, ?, ?, ?)
     `;
 
-    await db.query(query, [trackId, filename, kid, encrypted_cek, sourceFormat]);
-    console.log(`✅ [DB] Track created: ${trackId} with KID: ${kid}`);
+    try {
+      await db.query(query, [trackId, filename, kid, encrypted_cek, sourceFormat]);
+      console.log(`✅ [DB] Track created: ${trackId} with KID: ${kid}`);
 
-    return {
-      trackId,
-      kid,
-      encrypted_cek
-    };
+      return {
+        trackId,
+        kid,
+        encrypted_cek
+      };
+    } catch (dbError: any) {
+      // Check for KID uniqueness constraint violation
+      if (dbError.code === 'ER_DUP_ENTRY' && dbError.message?.includes('kid')) {
+        console.error('❌ [DB] KID collision detected, retrying with new KID');
+        // Recursively retry with a new KID
+        return createTrack(filename, sourceFormat);
+      }
+      throw dbError;
+    }
   } catch (error: any) {
     console.error('❌ [DB] Error creating track:', error.message);
     throw error;
@@ -74,7 +85,7 @@ export const getEncryptedCEKByKID = async (kid: string): Promise<string | null> 
  * Get track info by ID
  * @param trackId UUID of the track
  */
-export const getTrackById = async (trackId: string): Promise<any> => {
+export const getTrackById = async (trackId: string): Promise<Track | null> => {
   try {
     const query = 'SELECT * FROM tracks WHERE id = ?';
     const [rows]: any = await db.query(query, [trackId]);
@@ -84,7 +95,7 @@ export const getTrackById = async (trackId: string): Promise<any> => {
       return null;
     }
 
-    return rows[0];
+    return rows[0] as Track;
   } catch (error: any) {
     console.error('❌ [DB] Error retrieving track:', error.message);
     throw error;
@@ -135,7 +146,7 @@ export const saveDASHManifest = async (
  * Get active DASH manifest for a track
  * @param trackId UUID of the track
  */
-export const getActiveManifest = async (trackId: string): Promise<any> => {
+export const getActiveManifest = async (trackId: string): Promise<DASHManifest | null> => {
   try {
     const query = `
       SELECT * FROM dash_manifests 
@@ -150,7 +161,7 @@ export const getActiveManifest = async (trackId: string): Promise<any> => {
       return null;
     }
 
-    return rows[0];
+    return rows[0] as DASHManifest;
   } catch (error: any) {
     console.error('❌ [DB] Error retrieving manifest:', error.message);
     throw error;
@@ -177,7 +188,8 @@ export const logAuditEvent = async (
       INSERT INTO audit_logs (action, track_id, kid, user_id, target_file)
       VALUES (?, ?, ?, ?, ?)
     `;
-    await db.query(query, [action, trackId || null, kid || null, userId || 'SYSTEM', targetFile || null]);
+    const truncatedFile = targetFile ? targetFile.slice(0, 255) : null;
+    await db.query(query, [action, trackId || null, kid || null, userId || 'SYSTEM', truncatedFile]);
     console.log(`📝 [DB] Audit logged: ${action} for track ${trackId || 'N/A'}`);
   } catch (error: any) {
     console.error('❌ [DB] Error logging audit event:', error.message);

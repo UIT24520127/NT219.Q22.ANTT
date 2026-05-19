@@ -1,10 +1,10 @@
-import { exec, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { kmsService } from '../kms/bao';
+import type { PackagingResult } from '../types';
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 // Cấu hình đường dẫn output
@@ -16,12 +16,27 @@ const AUDIO_METADATA_DIR = process.env.AUDIO_METADATA_DIR || '/audio/metadata';
 const WIDEVINE_PROVIDER_URL = process.env.WIDEVINE_PROVIDER_URL || 'https://license.widevine.com/cenc/getcontentkey/widevine_test';
 
 /**
- * Ensure output directories exist
+ * Ensure output directories exist and are writable
  */
 const ensureDirectories = () => {
-  [AUDIO_SEGMENTS_DIR, AUDIO_MANIFESTS_DIR, AUDIO_METADATA_DIR].forEach(dir => {
+  const dirs = [AUDIO_SEGMENTS_DIR, AUDIO_MANIFESTS_DIR, AUDIO_METADATA_DIR];
+  dirs.forEach(dir => {
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      try {
+        mkdirSync(dir, { recursive: true });
+        console.log(`📁 [Packager] Created directory: ${dir}`);
+      } catch (error: any) {
+        throw new Error(`Failed to create directory ${dir}: ${error.message}`);
+      }
+    }
+    // Verify directory is writable
+    try {
+      // Try to create a test file
+      const testFile = path.join(dir, '.writetest');
+      writeFileSync(testFile, '');
+      require('fs').unlinkSync(testFile);
+    } catch (error: any) {
+      throw new Error(`Directory ${dir} is not writable: ${error.message}`);
     }
   });
 };
@@ -34,8 +49,8 @@ const ensureDirectories = () => {
 const decryptCEKForPackaging = async (encryptedCek: string): Promise<string> => {
   try {
     const plaintext = await kmsService.decryptKey(encryptedCek);
-    // Ensure it's in hex format (64 characters for 256-bit key)
-    if (plaintext.length === 64 && /^[0-9a-f]+$/.test(plaintext)) {
+    // Ensure it's in hex format (32 characters for 128-bit AES key)
+    if (plaintext.length === 32 && /^[0-9a-f]+$/.test(plaintext)) {
       return plaintext;
     }
     throw new Error('CEK not in valid hex format');
@@ -46,17 +61,57 @@ const decryptCEKForPackaging = async (encryptedCek: string): Promise<string> => 
 };
 
 /**
+ * Try to resolve ffprobe path inside Next.js bundled environment robustly
+ */
+const getFFprobePath = (): string => {
+  try {
+    const os = require('os');
+    const platform = os.platform();
+    const arch = os.arch();
+    const binaryName = platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
+    
+    // Attempt 1: Resolve relative to process.cwd() (Next.js project root)
+    const localPath = path.join(process.cwd(), 'node_modules/ffprobe-static/bin', platform, arch, binaryName);
+    if (existsSync(localPath)) {
+      return localPath;
+    }
+
+    // Attempt 2: Use require.resolve to find package location
+    const indexPath = require.resolve('ffprobe-static');
+    const packageDir = path.dirname(indexPath);
+    const resolvedPath = path.join(packageDir, 'bin', platform, arch, binaryName);
+    if (existsSync(resolvedPath)) {
+      return resolvedPath;
+    }
+  } catch (e) {
+    console.warn('⚠️ [Packager] Failed to resolve ffprobe-static path dynamically:', e);
+  }
+
+  // Attempt 3: Standard import fallback
+  try {
+    const ffprobe = require('ffprobe-static');
+    if (ffprobe.path && existsSync(ffprobe.path)) {
+      return ffprobe.path;
+    }
+  } catch (_) {}
+
+  // Attempt 4: System-wide PATH command
+  return 'ffprobe';
+};
+
+/**
  * Extract audio metadata using ffprobe
  * @param inputPath Path to input audio file
  */
 const extractMediaMetadata = async (inputPath: string) => {
   try {
-    const ffprobe = require('ffprobe-static');
-    const { stdout } = await execFileAsync(ffprobe.path, [
+    const ffprobePath = getFFprobePath();
+    console.log(`📊 [Packager] Using ffprobe binary at: ${ffprobePath}`);
+    const { stdout } = await execFileAsync(ffprobePath, [
       '-v', 'error',
       '-show_format',
       '-show_streams',
-      '-print_json',
+      '-print_format', 'json',
       inputPath
     ]);
     return JSON.parse(stdout);
@@ -72,14 +127,14 @@ const extractMediaMetadata = async (inputPath: string) => {
  * @param trackId Unique track identifier (UUID)
  * @param kid Key ID (16 bytes hex string)
  * @param encryptedCek Encrypted CEK from OpenBao (vault:v1:...)
- * @returns Object with paths to generated MPD and segments
+ * @returns PackagingResult object with paths to generated MPD and segments
  */
 export const encryptAndPackageMedia = async (
   inputPath: string,
   trackId: string,
   kid: string,
   encryptedCek: string
-) => {
+): Promise<PackagingResult> => {
   try {
     ensureDirectories();
 
@@ -114,29 +169,29 @@ export const encryptAndPackageMedia = async (
     //         --encryption_key=<kid>:<key>
     //         --mpd_output=<mpd>
 
-    const packagerCmd = [
-      'packager',
+    const packagerArgs = [
       `input=${inputPath},stream=audio,output=${path.join(outputDir, 'segment.mp4')},drm_label=audio`,
-      '--enable_widevine_encryption',
-      `--key_server_url=${WIDEVINE_PROVIDER_URL}`,
-      `--encryption_key=${kid}:${plaintextCek}`,
+      '--enable_raw_key_encryption',
+      '--keys', `label=audio:key_id=${kid}:key=${plaintextCek}`,
+      '--protection_systems', 'Widevine',
       `--mpd_output=${mpdPath}`,
-      '--generate_static_mpd'
+      '--generate_static_live_mpd'
     ];
 
     console.log('🚀 [Packager] Executing Shaka Packager...');
-    console.log(`Command: ${packagerCmd.join(' ')}`);
+    console.log(`Command: packager ${packagerArgs.join(' ')}`);
 
-    // Execute Shaka Packager
+    // Execute Shaka Packager using execFile to avoid shell injection
     try {
-      const { stdout, stderr } = await execAsync(packagerCmd.join(' '));
+      const { stdout, stderr } = await execFileAsync('packager', packagerArgs);
       if (stderr) console.log('⚠️  [Packager] stderr:', stderr);
       console.log('✅ [Packager] Shaka Packager completed successfully');
     } catch (error: any) {
       // Shaka Packager might return exit code > 0 but still succeed, so we check for errors in output
-      if (error.message && error.message.includes('ERROR')) {
+      if (error.stderr && error.stderr.includes('ERROR')) {
         throw error;
       }
+      // Only treat as warning if no error markers found
       console.log('⚠️  [Packager] Packager exited with code, but may have succeeded');
     }
 
@@ -170,7 +225,7 @@ export const encryptAndPackageMedia = async (
       mpdPreview: mpdContent.substring(0, 500) + '...' // First 500 chars for debugging
     };
 
-    require('fs').writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+    writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
     console.log(`💾 [Packager] Metadata saved to ${metadataPath}`);
 
     console.log(`✨ [Packager] Packaging complete! MPD: ${mpdPath}`);
@@ -189,27 +244,5 @@ export const encryptAndPackageMedia = async (
   } catch (error: any) {
     console.error('❌ [Packager] Packaging failed:', error.message);
     throw error;
-  }
-};
-
-/**
- * Verify CENC encryption in generated segments
- * Checks if segment contains proper CENC encryption box (sinf)
- * @param segmentPath Path to .mp4 segment file
- */
-export const verifyCENCEncryption = async (segmentPath: string): Promise<boolean> => {
-  try {
-    // Read first 1KB of segment to check for 'sinf' box (CENC metadata)
-    const buffer = readFileSync(segmentPath);
-    const hexContent = buffer.toString('hex');
-    
-    // 'sinf' in hex is 0x73696e66
-    const hasSinf = hexContent.includes('73696e66');
-    
-    console.log(hasSinf ? '✅ [Packager] CENC encryption verified' : '⚠️  [Packager] Warning: CENC box not found');
-    return hasSinf;
-  } catch (error: any) {
-    console.error('❌ [Packager] CENC verification error:', error.message);
-    return false;
   }
 };

@@ -17,11 +17,11 @@ export const generateKID = (): string => {
 
 /**
  * Tạo Content Encryption Key (CEK) ngẫu nhiên
- * Tiêu chuẩn: 256-bit (32 bytes) cho AES-256
- * @returns CEK dạng hex string (64 ký tự)
+ * Tiêu chuẩn Widevine AES-128 CENC: 128-bit (16 bytes) cho AES-128
+ * @returns CEK dạng hex string (32 ký tự)
  */
 export const generateCEK = (): string => {
-  return randomBytes(32).toString('hex');
+  return randomBytes(16).toString('hex');
 };
 
 export const kmsService = {
@@ -39,13 +39,13 @@ export const kmsService = {
           plaintext: Buffer.from(plaintextCek).toString('base64') 
         },
         { 
-          headers: { 'X-Bao-Token': BAO_TOKEN } 
+          headers: { 'X-Vault-Token': BAO_TOKEN } 
         }
       );
       return response.data.data.ciphertext; // Trả về chuỗi mã hóa thành công
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error('❌ [KMS ERROR] Lỗi mã hóa khóa tại OpenBao:', error.response?.data || message);
+      console.error('❌ [KMS ERROR] Lỗi mã hóa khóa tại OpenBao:', message);
       throw new Error('KMS Encryption Failed');
     }
   },
@@ -61,14 +61,14 @@ export const kmsService = {
         `${BAO_ADDR}/v1/transit/decrypt/${KEY_NAME}`,
         { ciphertext: ciphertextCek },
         { 
-          headers: { 'X-Bao-Token': BAO_TOKEN } 
+          headers: { 'X-Vault-Token': BAO_TOKEN } 
         }
       );
       // Giải mã dữ liệu Base64 từ OpenBao trả về dạng chuỗi tường minh
       return Buffer.from(response.data.data.plaintext, 'base64').toString('utf-8');
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error('❌ [KMS ERROR] Lỗi giải mã khóa tại OpenBao:', error.response?.data || message);
+      console.error('❌ [KMS ERROR] Lỗi giải mã khóa tại OpenBao:', message);
       throw new Error('KMS Decryption Failed');
     }
   }

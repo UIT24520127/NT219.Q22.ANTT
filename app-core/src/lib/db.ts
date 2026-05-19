@@ -16,4 +16,17 @@ const pool = mysql.createPool({
   queueLimit: 0         // Không giới hạn hàng đợi yêu cầu
 });
 
+// Graceful shutdown handler
+if (typeof process !== 'undefined') {
+  process.on('SIGTERM', async () => {
+    console.log('📋 [DB] SIGTERM received, closing database connections...');
+    try {
+      await pool.end();
+      console.log('✅ [DB] Database connections closed successfully');
+    } catch (error) {
+      console.error('❌ [DB] Error closing database connections:', error);
+    }
+  });
+}
+
 export default pool;

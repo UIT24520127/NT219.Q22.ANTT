@@ -33,10 +33,10 @@ const validateAudioFile = (filename: string, buffer: Buffer): boolean => {
   }
 
   // Check magic bytes for AAC/M4A
-  // M4A/MP4 starts with 'ftyp'
+  // M4A/MP4 has 'ftyp' at bytes 4-7
   // AAC starts with 0xFFE or 0xFFF (syncword)
-  const magicBytes = buffer.slice(0, 4).toString('hex');
-  const hasM4ASignature = magicBytes.includes('6674797'); // 'ftyp' in hex
+  const magicBytes = buffer.slice(0, 12).toString('hex');
+  const hasM4ASignature = magicBytes.includes('66747970'); // 'ftyp' in hex ('66747970')
   const hasAACSignature = (buffer[0] & 0xFF) === 0xFF && ((buffer[1] & 0xE0) === 0xE0);
 
   if (!hasM4ASignature && !hasAACSignature) {
@@ -146,23 +146,33 @@ export async function POST(request: NextRequest) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       console.error('❌ [Ingest] Packaging failed:', message);
       await logAuditEvent('PACKAGE_FAILED', trackId, kid, 'SYSTEM', audioFile.filename);
-      throw new Error(`Packaging failed: ${error.message}`);
-      return null;
+      throw new Error(`Packaging failed: ${message}`);
     }
 
-    // Step 5: Update track with duration from packaging result
+    // Step 5: Validate packaging result
+    if (!packagingResult || !packagingResult.mpdPath || !packagingResult.segmentDir) {
+      throw new Error('Invalid packaging result: missing required properties');
+    }
+
+    // Step 6: Update track with duration from packaging result
     if (packagingResult.duration) {
       await updateTrackDuration(trackId, packagingResult.duration);
     }
 
-    // Step 6: Deactivate old manifests and save new one
+    // Step 7: Deactivate old manifests and save new one
     await deactivateOldManifests(trackId);
     await saveDASHManifest(trackId, packagingResult.mpdPath);
 
-    // Step 7: Log success
-    await logAuditEvent('PACKAGE_CREATED', trackId, kid, 'SYSTEM', audioFile.filename);
+    // Step 8: Log success (error handled gracefully)
+    try {
+      await logAuditEvent('PACKAGE_CREATED', trackId, kid, 'SYSTEM', audioFile.filename);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.warn('⚠️  [Ingest] Audit logging failed:', message);
+      // Don't fail the upload due to logging issues
+    }
 
-    // Step 8: Cleanup temporary file
+    // Step 9: Cleanup temporary file
     try {
       unlinkSync(tempFilePath);
       console.log(`🧹 [Ingest] Temporary file cleaned up`);
@@ -171,7 +181,7 @@ export async function POST(request: NextRequest) {
       console.warn(`⚠️  [Ingest] Could not delete temporary file: ${message}`);
     }
 
-    // Step 9: Return success response
+    // Step 10: Return success response
     console.log(`✨ [Ingest] Upload and packaging complete for track ${trackId}`);
     
     return NextResponse.json({
@@ -195,7 +205,7 @@ export async function POST(request: NextRequest) {
 
     // Log failure
     if (trackId) {
-      await logAuditEvent('INGEST_FAILED', trackId, undefined, 'SYSTEM', error.message);
+      await logAuditEvent('INGEST_FAILED', trackId, undefined, 'SYSTEM', message);
     }
 
     // Cleanup temporary file if it exists
@@ -208,7 +218,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         error: 'Upload processing failed',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        details: process.env.NODE_ENV === 'development' ? message : undefined
       },
       { status: 500 }
     );
