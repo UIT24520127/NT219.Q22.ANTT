@@ -18,22 +18,27 @@ export default function LoginPage() {
   };
 
   const handlePasswordLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    const REALM_NAME = "drm-realm";
-    const CLIENT_ID = "frontend-client";
+  e.preventDefault();
+  setLoading(true);
 
-    try {
-      const response = await fetch(`http://localhost:8080/realms/${REALM_NAME}/protocol/openid-connect/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'password',
-          client_id: CLIENT_ID,
-          username: username,
-          password: password,
-        }),
-      });
+  // Tự động lấy từ file .env, nếu thiếu thì tự fallback về giá trị mặc định
+  const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://localhost:8080";
+  const REALM_NAME = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "drm-realm";
+  const CLIENT_ID = "frontend-client"; 
+
+  try {
+    // Gọi URL động theo cấu hình hệ thống
+    const response = await fetch(`${KEYCLOAK_URL}/realms/${REALM_NAME}/protocol/openid-connect/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'password',
+        client_id: CLIENT_ID,
+        username: username,
+        password: password,
+      }),
+    });
+// ... các đoạn code bên dưới giữ nguyên y hệt ...
 
       const data = await response.json();
       if (response.ok) {
