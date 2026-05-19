@@ -1,9 +1,28 @@
 import axios from 'axios';
+import { randomBytes } from 'crypto';
 
 // Định cấu hình tự động: Nếu chạy local dùng localhost, nếu chạy container dùng tên service 'drm_kms'
 const BAO_ADDR = process.env.BAO_ADDR || 'http://localhost:8200';
 const BAO_TOKEN = process.env.BAO_DEV_ROOT_TOKEN_ID || 'root-token'; // Khớp với Root Token trong docker-compose
 const KEY_NAME = process.env.KMS_TRANSIT_KEY_NAME || 'music-app-key'; // Khớp với Master Key tạo từ setup-bao.sh
+
+/**
+ * Tạo Key ID (KID) ngẫu nhiên cho mỗi track
+ * Widevine standard yêu cầu KID là 128-bit (16 bytes)
+ * @returns KID dạng hex string (32 ký tự)
+ */
+export const generateKID = (): string => {
+  return randomBytes(16).toString('hex');
+};
+
+/**
+ * Tạo Content Encryption Key (CEK) ngẫu nhiên
+ * Tiêu chuẩn Widevine AES-128 CENC: 128-bit (16 bytes) cho AES-128
+ * @returns CEK dạng hex string (32 ký tự)
+ */
+export const generateCEK = (): string => {
+  return randomBytes(16).toString('hex');
+};
 
 export const kmsService = {
   /**
@@ -20,12 +39,13 @@ export const kmsService = {
           plaintext: Buffer.from(plaintextCek).toString('base64') 
         },
         { 
-          headers: { 'X-Bao-Token': BAO_TOKEN } 
+          headers: { 'X-Vault-Token': BAO_TOKEN } 
         }
       );
       return response.data.data.ciphertext; // Trả về chuỗi mã hóa thành công
-    } catch (error: any) {
-      console.error('❌ [KMS ERROR] Lỗi mã hóa khóa tại OpenBao:', error.response?.data || error.message);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error('❌ [KMS ERROR] Lỗi mã hóa khóa tại OpenBao:', message);
       throw new Error('KMS Encryption Failed');
     }
   },
@@ -41,13 +61,14 @@ export const kmsService = {
         `${BAO_ADDR}/v1/transit/decrypt/${KEY_NAME}`,
         { ciphertext: ciphertextCek },
         { 
-          headers: { 'X-Bao-Token': BAO_TOKEN } 
+          headers: { 'X-Vault-Token': BAO_TOKEN } 
         }
       );
       // Giải mã dữ liệu Base64 từ OpenBao trả về dạng chuỗi tường minh
       return Buffer.from(response.data.data.plaintext, 'base64').toString('utf-8');
-    } catch (error: any) {
-      console.error('❌ [KMS ERROR] Lỗi giải mã khóa tại OpenBao:', error.response?.data || error.message);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      console.error('❌ [KMS ERROR] Lỗi giải mã khóa tại OpenBao:', message);
       throw new Error('KMS Decryption Failed');
     }
   }
