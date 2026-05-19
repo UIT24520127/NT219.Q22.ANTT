@@ -183,16 +183,23 @@ export const encryptAndPackageMedia = async (
 
     // Execute Shaka Packager using execFile to avoid shell injection
     try {
+      console.log('🚀 [Packager] Running Shaka Packager commands...');
       const { stdout, stderr } = await execFileAsync('packager', packagerArgs);
+      
       if (stderr) console.log('⚠️  [Packager] stderr:', stderr);
       console.log('✅ [Packager] Shaka Packager completed successfully');
     } catch (error: any) {
-      // Shaka Packager might return exit code > 0 but still succeed, so we check for errors in output
-      if (error.stderr && error.stderr.includes('ERROR')) {
-        throw error;
+      // BẮT LỖI THỰC SỰ: Chỉ chặn luồng nếu trong log của Shaka Packager chứa chữ "ERROR" nặng
+      if (error.stderr && error.stderr.toUpperCase().includes('ERROR')) {
+        console.error('❌ [Packager] Shaka Packager encountered a fatal error:', error.stderr);
+        throw error; // Ném lỗi ra ngoài để dừng API
       }
-      // Only treat as warning if no error markers found
-      console.log('⚠️  [Packager] Packager exited with code, but may have succeeded');
+      
+      // NẾU CHỈ LÀ WARNING (Thoát mã > 0 trên Windows nhưng file vẫn đang ghi ngầm):
+      console.log('⚠️  [Packager] Packager returned a non-zero code (Warning), checking file generation...');
+      
+      // TẠO ĐỘ TRỄ MẠNG (DELAY) 1 GIÂY: Ép Windows hoàn tất việc ghi file .mpd xuống đĩa cứng trước khi check
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
     // Step 5: Verify MPD file was created
