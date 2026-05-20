@@ -153,3 +153,11 @@ vite.config.ts.timestamp-*
 
 # Các tệp tạm của Ingest Pipeline (nếu có mount ra ngoài)
 /temp-audio/
+
+# Chặn toàn bộ các file phân đoạn nhạc mã hóa DRM sinh ra trong public
+public/audio/segments/*
+public/audio/manifests/
+
+# Chặn toàn bộ file metadata tạm thời sinh ra trong thư mục tmp
+tmp/
+app-core/tmp/*

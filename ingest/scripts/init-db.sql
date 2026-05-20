@@ -1,0 +1,3 @@
+-- This file is intentionally empty
+-- Database initialization is handled by /data/database/init.sql in docker-compose
+-- For custom ingest-specific migrations, add them here and execute manually
