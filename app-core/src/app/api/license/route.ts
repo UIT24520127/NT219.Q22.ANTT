@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { kmsService } from '@/lib/kms/bao';
 import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
+import crypto from 'crypto'
 
 /**
  * Extract KID from Widevine Challenge
@@ -91,19 +92,45 @@ export async function POST(request: Request) {
 
     console.log(`✅ [License] CEK decrypted successfully for KID: ${kid}`);
 
-    // 5. Build Widevine License Response (binary format)
-    // Standard format: DRM Header + CEK
-    const drmHeader = Buffer.from([0x00, 0x01, 0x44, 0x52, 0x4d, 0x4c, 0x49, 0x43]); // DRMLIC
-    const cekBuffer = Buffer.from(plaintextCek, 'hex');
-    const licenseResponsePayload = Buffer.concat([drmHeader, cekBuffer]);
+    // =========================================================================
+    // 🔥 PHẦN CỦA NGƯỜI A: NÂNG CẤP BẢO MẬT TUẦN 2 (KÝ SỐ BẢN TIN LICENSE)
+    // =========================================================================
+    
+    // 1. Tạo cấu trúc bản tin License hoàn chỉnh (Payload)
+    const licensePayload = {
+      kid: kid,
+      cek: plaintextCek, // Khóa thô đã giải mã từ OpenBao
+      issuedAt: Date.now(),
+      ttl: 3600 // Thời gian sống của khóa (1 giờ)
+    };
+    const licensePayloadBuffer = Buffer.from(JSON.stringify(licensePayload));
 
-    console.log(`📦 [License] License response ready: ${licenseResponsePayload.length} bytes`);
+    // 2. Ký số chống giả mạo Server (Digital Signature) bằng thuật toán RSA-SHA256
+    // Ở Tuần 2 này, ta dùng crypto sinh một cặp khóa RSA trực tiếp để test luồng ký.
+    // (Tuần 3-4 bạn sẽ chuyển sang đọc file private_key.pem cứng hoặc lấy từ OpenBao).
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+    });
 
-    // 6. Log audit event
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(licensePayloadBuffer);
+    const signatureBuffer = signer.sign(privateKey);
+
+    // 3. Gộp bản tin hoàn chỉnh gửi về cho Người C (Frontend) Verify
+    // Định dạng cấu trúc gói tin Binary an toàn: 
+    // [4 byte: Độ dài payload] + [Mảng byte Payload JSON] + [Mảng byte Chữ ký số]
+    const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
+    finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0); 
+    licensePayloadBuffer.copy(finalLicenseBuffer, 4); 
+    signatureBuffer.copy(finalLicenseBuffer, 4 + licensePayloadBuffer.length);
+
+    console.log(`📦 [LicenseProxy - Người A] Ký số thành công! Tổng dung lượng: ${finalLicenseBuffer.length} bytes`);
+
+    // 6. Log audit event (Giữ nguyên của bạn B)
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
 
-    // 7. Return binary response to Shaka Player
-    return new NextResponse(licenseResponsePayload, {
+    // 7. Trả dữ liệu mã hóa nhị phân về cho Shaka Player
+    return new NextResponse(finalLicenseBuffer, {
       headers: {
         'Content-Type': 'application/octet-stream',
         'Access-Control-Allow-Origin': '*',
