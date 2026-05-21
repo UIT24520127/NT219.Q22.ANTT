@@ -26,16 +26,20 @@ services:
       BAO_ADDR: "http://0.0.0.0:8200"
     command: server -dev -dev-root-token-id=root-token
 
-  # 3. Keycloak - Xác thực WebAuthn
+  # 3. Keycloak - Xác thực WebAuthn (ĐÃ ĐỒNG BỘ TỰ ĐỘNG IMPORT)
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: drm_auth
-    command: start-dev
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     ports:
       - "8080:8080"
+    volumes:
+      # 🔥 CHIÊU THỨC QUAN TRỌNG: Gắn file realm-export.json cùng cấp vào thư mục tự động nạp của Keycloak
+      - ./realm-export.json:/opt/keycloak/data/import/realm.json
+    # 🔥 THAY ĐỔI LỆNH CHẠY: Bắt buộc phải có "--import-realm" để Keycloak quét thư mục import khi khởi động
+    command: start-dev --import-realm
 
   # 4. OPA - Kiểm tra quyền hạn (Policy)
   opa:
