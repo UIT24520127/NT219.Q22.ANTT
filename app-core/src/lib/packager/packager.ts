@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { kmsService } from '../kms/bao';
+import { r2Service } from '../storage/r2';
 import type { PackagingResult } from '../types';
 
 const execFileAsync = promisify(execFile);
@@ -235,6 +236,32 @@ export const encryptAndPackageMedia = async (
     writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
     console.log(`💾 [Packager] Metadata saved to ${metadataPath}`);
 
+    // Step 8: Upload packaging results to Cloudflare R2 (secure storage)
+    console.log('📤 [Packager] Uploading packaged files to Cloudflare R2...');
+    try {
+      const r2Prefix = `audio/${trackId}/`;
+      
+      // Upload MPD manifest
+      await r2Service.uploadFile(
+        mpdPath,
+        `${r2Prefix}manifest.mpd`,
+        'application/dash+xml'
+      );
+
+      // Upload all segment files from output directory
+      await r2Service.uploadDirectory(
+        outputDir,
+        r2Prefix,
+        ['.mp4', '.m4s', '.init'] // Include all segment file types
+      );
+
+      console.log(`✅ [Packager] All files uploaded to R2 successfully`);
+    } catch (error: any) {
+      console.error('❌ [Packager] R2 upload failed:', error.message);
+      console.error('⚠️  [Packager] Files are still available locally but NOT uploaded to secure storage');
+      throw new Error(`R2 Upload Failed: ${error.message}`);
+    }
+
     console.log(`✨ [Packager] Packaging complete! MPD: ${mpdPath}`);
 
     return {
@@ -246,7 +273,7 @@ export const encryptAndPackageMedia = async (
       metadataPath,
       duration,
       bitrate,
-      message: 'Package created successfully'
+      message: 'Package created and uploaded to R2 successfully'
     };
   } catch (error: any) {
     console.error('❌ [Packager] Packaging failed:', error.message);
