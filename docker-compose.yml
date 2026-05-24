@@ -11,10 +11,11 @@ services:
       MARIADB_ROOT_PASSWORD: root_password
       MARIADB_DATABASE: drm_system
     volumes:
-      # SỬA ĐƯỜNG DẪN TẠI ĐÂY: Trỏ đúng vào thư mục mới data/database/
       - ./data/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - drm-network
 
-  # 2. OpenBao - Quản lý khóa (KMS)
+  # 2. OpenBao - Quản lý khóa (KMS) with mTLS support
   openbao:
     image: quay.io/openbao/openbao:2.0
     container_name: drm_kms
@@ -24,9 +25,14 @@ services:
       BAO_DEV_ROOT_TOKEN_ID: "root-token"
       VAULT_DEV_ROOT_TOKEN_ID: "root-token"
       BAO_ADDR: "http://0.0.0.0:8200"
+    volumes:
+      # Mount mTLS certificates (optional, for production)
+      - ./security/certificates/certs:/vault/config/certs:ro
     command: server -dev -dev-root-token-id=root-token
+    networks:
+      - drm-network
 
-  # 3. Keycloak - Xác thực WebAuthn (ĐÃ ĐỒNG BỘ TỰ ĐỘNG IMPORT)
+  # 3. Keycloak - Xác thực WebAuthn
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: drm_auth
@@ -36,10 +42,10 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # 🔥 CHIÊU THỨC QUAN TRỌNG: Gắn file realm-export.json cùng cấp vào thư mục tự động nạp của Keycloak
       - ./realm-export.json:/opt/keycloak/data/import/realm.json
-    # 🔥 THAY ĐỔI LỆNH CHẠY: Bắt buộc phải có "--import-realm" để Keycloak quét thư mục import khi khởi động
     command: start-dev --import-realm
+    networks:
+      - drm-network
 
   # 4. OPA - Kiểm tra quyền hạn (Policy)
   opa:
@@ -48,6 +54,114 @@ services:
     ports:
       - "8181:8181"
     volumes:
-      # BỔ SUNG VOLUME: Mount folder policies từ gốc máy vào container
       - ./policies:/policies:ro
     command: "run --server /policies"
+    networks:
+      - drm-network
+
+  # 5. Next.js Application Server
+  app:
+    build:
+      context: ./app-core
+    container_name: drm_app
+    ports:
+      - "3000:3000"
+    environment:
+      # Database
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: root_password
+      DB_NAME: drm_system
+      DATABASE_URL: "mysql://root:root_password@db:3306/drm_system"
+
+      # OpenBao KMS (mTLS enabled if HTTPS used)
+      BAO_ADDR: "http://openbao:8200"
+      BAO_DEV_ROOT_TOKEN_ID: "root-token"
+      KMS_TRANSIT_KEY_NAME: "music-app-key"
+
+      # Cloudflare R2 Storage
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      R2_REGION: auto
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_ENDPOINT: "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+      # mTLS Certificates (optional)
+      MTLS_CERT_DIR: /app/certs
+      NODE_ENV: production
+    volumes:
+      # Mount mTLS client certificates
+      - ./security/certificates/certs:/app/certs:ro
+      # Mount packager output directory
+      - /audio:/audio
+    depends_on:
+      - db
+      - openbao
+      - keycloak
+    networks:
+      - drm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 6. Nginx - Reverse Proxy & Signed URL Gateway
+  nginx:
+    image: nginx:latest
+    container_name: drm_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Nginx configuration
+      - ./security/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # SSL certificates for HTTPS
+      - ./security/nginx/certs:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    networks:
+      - drm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  drm-network:
+    driver: bridge
+
+# ============================================================================
+# SETUP INSTRUCTIONS:
+# ============================================================================
+# 1. Generate mTLS certificates:
+#    chmod +x security/certificates/generate-mtls-certs.sh
+#    ./security/certificates/generate-mtls-certs.sh
+#
+# 2. Create .env file with R2 credentials:
+#    cat > .env << EOF
+#    R2_ACCOUNT_ID=your_account_id
+#    R2_BUCKET_NAME=encrypted-audio
+#    R2_ACCESS_KEY_ID=your_access_key
+#    R2_SECRET_ACCESS_KEY=your_secret_key
+#    EOF
+#
+# 3. Create Nginx SSL certificates (self-signed for development):
+#    mkdir -p security/nginx/certs
+#    openssl req -x509 -newkey rsa:4096 -keyout security/nginx/certs/key.pem \
+#      -out security/nginx/certs/cert.pem -days 365 -nodes
+#
+# 4. Start all services:
+#    docker-compose up -d
+#
+# 5. Wait for services to be healthy:
+#    docker-compose ps
+#
+# 6. Initialize OpenBao with Transit engine:
+#    docker exec drm_kms bao secrets enable transit
+#    docker exec drm_kms bao write -f transit/keys/music-app-key
+# ============================================================================
