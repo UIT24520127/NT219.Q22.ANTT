@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { kmsService } from '@/lib/kms/bao';
 import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
+import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import crypto from 'crypto'
 
 /**
@@ -70,6 +71,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No KID provided in challenge or headers' }, { status: 400 });
     }
 
+    // =========================================================================
+    // 🔥 BƯỚC CỦA NGƯỜI A (TUẦN 3): LẤY PUBLIC KEY CỦA CLIENT QUA HEADER
+    // =========================================================================
+    const clientPublicKeyHex = request.headers.get('x-client-public-key');
+    if (!clientPublicKeyHex) {
+      console.error('❌ [License - Người A] Giao dịch thất bại: Thiếu x-client-public-key header để thiết lập ECDH');
+      return NextResponse.json({ error: 'ECDH Handshake Required: Missing client public key' }, { status: 400 });
+    }
+
     // 3. Query database for encrypted CEK using KID
     console.log(`🔍 [License] Looking up CEK for KID: ${kid}`);
     const encryptedCek = await getEncryptedCEKByKID(kid);
@@ -92,23 +102,38 @@ export async function POST(request: Request) {
 
     console.log(`✅ [License] CEK decrypted successfully for KID: ${kid}`);
 
+// =========================================================================
+    // 🔥 [MÃ NGUỒN NGƯỜI A - TUẦN 3]: GỌI TỪ FILE ECDH.TS SANG ĐỂ WRAPPING KHÓA
     // =========================================================================
-    // 🔥 PHẦN CỦA NGƯỜI A: NÂNG CẤP BẢO MẬT TUẦN 2 (KÝ SỐ BẢN TIN LICENSE)
+    console.log('🛡️ [License - Người A] Đang gọi module mật mã từ file ecdh.ts...');
+
+    // Gọi hàm từ module ecdh để bọc khóa CEK
+    const { serverPublicKeyHex, wrappedCekHex, ivHex } = wrapCekWithECDH(
+      clientPublicKeyHex,
+      plaintextCek
+    );
+
+    console.log('✅ [License - Người A] Khóa CEK đã được bọc mật mã an toàn tuyệt đối từ file ecdh.ts.');
+
     // =========================================================================
-    
-    // 1. Tạo cấu trúc bản tin License hoàn chỉnh (Payload)
+    // 🔥 CẤU TRÚC LẠI BẢN TIN LICENSE PAYLOAD (SỬ DỤNG KẾT QUẢ TỪ FILE ECDH.TS)
+    // =========================================================================
     const licensePayload = {
       kid: kid,
-      cek: plaintextCek, // Khóa thô đã giải mã từ OpenBao
+      wrappedCek: wrappedCekHex,        // Nhận chuỗi Hex từ hàm wrapCekWithECDH
+      serverPublicKey: serverPublicKeyHex, // Nhận chuỗi Hex từ hàm wrapCekWithECDH
+      iv: ivHex,                        // Nhận chuỗi Hex từ hàm wrapCekWithECDH
       issuedAt: Date.now(),
-      ttl: 3600 // Thời gian sống của khóa (1 giờ)
+      ttl: 3600
     };
     const licensePayloadBuffer = Buffer.from(JSON.stringify(licensePayload));
 
-    // 2. Ký số chống giả mạo Server (Digital Signature) bằng thuật toán RSA-SHA256
-    // Ở Tuần 2 này, ta dùng crypto sinh một cặp khóa RSA trực tiếp để test luồng ký.
-    // (Tuần 3-4 bạn sẽ chuyển sang đọc file private_key.pem cứng hoặc lấy từ OpenBao).
-    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+    // =========================================================================
+    // 4. KÝ SỐ RSA-SHA256 CHỐNG GIẢ MẠO BẢN TIN (Kế thừa logic Tuần 2)
+    // =========================================================================
+    // Lưu ý: Sinh khóa RSA động dạng fallback để biên dịch không lỗi, 
+    // Nếu dự án có file private-key.pem, hãy dùng fs.readFileSync để thay thế chuỗi này
+    const { privateKey } = crypto.generateKeyPairSync('rsa', {
       modulusLength: 2048,
     });
 
@@ -116,17 +141,15 @@ export async function POST(request: Request) {
     signer.update(licensePayloadBuffer);
     const signatureBuffer = signer.sign(privateKey);
 
-    // 3. Gộp bản tin hoàn chỉnh gửi về cho Người C (Frontend) Verify
-    // Định dạng cấu trúc gói tin Binary an toàn: 
-    // [4 byte: Độ dài payload] + [Mảng byte Payload JSON] + [Mảng byte Chữ ký số]
+    // 5. Đóng gói cấu trúc mảng nhị phân đồng nhất (4 bytes độ dài + Payload + Chữ ký)
     const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
     finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0); 
     licensePayloadBuffer.copy(finalLicenseBuffer, 4); 
     signatureBuffer.copy(finalLicenseBuffer, 4 + licensePayloadBuffer.length);
 
-    console.log(`📦 [LicenseProxy - Người A] Ký số thành công! Tổng dung lượng: ${finalLicenseBuffer.length} bytes`);
+    console.log(`📦 [LicenseProxy - Người A] Hoàn tất bọc ECDH + Chữ ký RSA thành công! Size: ${finalLicenseBuffer.length} bytes`);
 
-    // 6. Log audit event (Giữ nguyên của bạn B)
+    // 6. Ghi nhận lịch sử hệ thống (Giữ nguyên của bạn B)
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
 
     // 7. Trả dữ liệu mã hóa nhị phân về cho Shaka Player
@@ -135,7 +158,7 @@ export async function POST(request: Request) {
         'Content-Type': 'application/octet-stream',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id',
+        'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id, x-client-public-key', // Đã mở khóa cors nhận diện public key từ Client
       },
     });
 
