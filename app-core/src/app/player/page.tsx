@@ -9,37 +9,113 @@ export default function CustomPlayerPage() {
   const router = useRouter();
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Sử dụng ref cho thẻ HTMLAudioElement và MediaSource
+  const [statusLog, setStatusLog] = useState<string>("Hệ thống sẵn sàng...");
+  
+  // State quản lý thời gian và âm lượng tự custom
+  const [currentTime, setCurrentTime] = useState("0:00");
+  const [duration, setDuration] = useState("0:00");
+  const [volume, setVolume] = useState(1.0); // Mức âm lượng mặc định: 100% (1.0)
+
   const audioRef = useRef<HTMLAudioElement>(null);
-  const mediaSourceRef = useRef<MediaSource | null>(null);
-  const sourceBufferRef = useRef<SourceBuffer | null>(null);
+
+  // Hàm helper định dạng số giây thành dạng mm:ss
+  const formatTime = (secs: number) => {
+    if (isNaN(secs)) return "0:00";
+    const minutes = Math.floor(secs / 60);
+    const seconds = Math.floor(secs % 60);
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
 
   useEffect(() => {
     const initECDH = async () => {
-      if (!globalKeyPair) {
-        console.log("🔑 [Client] Khởi tạo cặp khóa trao đổi ECDH (P-256)...");
-        globalKeyPair = await window.crypto.subtle.generateKey(
-          { name: "ECDH", namedCurve: "P-256" },
-          true,
-          ["deriveKey", "deriveBits"]
-        );
-        const exported = await window.crypto.subtle.exportKey("raw", globalKeyPair.publicKey);
-        globalPublicKeyHex = Array.from(new Uint8Array(exported))
-          .map(b => b.toString(16).padStart(2, '0'))
-          .join('');
-        console.log("✅ [Client] Public Key sẵn sàng đưa vào Header:", globalPublicKeyHex);
+      try {
+        if (!globalKeyPair) {
+          setStatusLog("🔑 Đang khởi tạo cặp khóa ECDH (P-256)...");
+          globalKeyPair = await window.crypto.subtle.generateKey(
+            { name: "ECDH", namedCurve: "P-256" },
+            true,
+            ["deriveKey", "deriveBits"]
+          );
+          const exported = await window.crypto.subtle.exportKey("raw", globalKeyPair.publicKey);
+          globalPublicKeyHex = Array.from(new Uint8Array(exported))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+          setStatusLog("✅ Hệ thống mật mã ECDH đã sẵn sàng trên RAM.");
+        }
+      } catch (err: any) {
+        setError("Lỗi khởi tạo hệ thống mật mã: " + err.message);
       }
     };
     initECDH();
+
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.src = "";
+        audioRef.current.load();
+      }
+    };
   }, []);
+
+  // Lắng nghe cập nhật từ thẻ audio ngầm
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleTimeUpdate = () => {
+      setCurrentTime(formatTime(audio.currentTime));
+    };
+
+    const handleLoadedMetadata = () => {
+      setDuration(formatTime(audio.duration));
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, []);
+
+  // Hàm xử lý khi kéo thanh volume
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVolume = parseFloat(e.target.value);
+    setVolume(newVolume);
+    if (audioRef.current) {
+      audioRef.current.volume = newVolume;
+    }
+  };
+
+  // Hàm click vào icon loa để Mute nhanh hoặc Unmute
+  const toggleMute = () => {
+    if (audioRef.current) {
+      if (volume > 0) {
+        setVolume(0);
+        audioRef.current.volume = 0;
+      } else {
+        setVolume(1.0);
+        audioRef.current.volume = 1.0;
+      }
+    }
+  };
+
+  // Helper hiển thị Icon Loa linh hoạt theo mức âm lượng
+  const getVolumeIcon = () => {
+    if (volume === 0) return "🔇";
+    if (volume < 0.4) return "🔈";
+    if (volume < 0.7) return "🔉";
+    return "🔊";
+  };
 
   const playSong = async () => {
     setError(null);
+    setIsPlaying(false);
+    
     try {
       if (!globalKeyPair) throw new Error("Hệ thống ECDH chưa khởi tạo xong!");
 
-      // 1. Gửi yêu cầu lấy License chứa wrapped CEK từ backend
-      console.log("📡 [Network] Đang gửi yêu cầu bắt tay lấy License...");
+      setStatusLog("📡 Đang gửi yêu cầu bắt tay lấy License...");
       const token = localStorage.getItem('token') || 'mock-token-uit-2026';
       
       const licenseRes = await fetch("http://localhost:3000/api/license", {
@@ -47,7 +123,6 @@ export default function CustomPlayerPage() {
         headers: {
           "Content-Type": "application/json",
           "authorization": `Bearer ${token}`,
-          // Sử dụng đúng KID đồng bộ với hệ thống file mã hóa trên R2 của ông
           "x-kid": "75635febb8a5be6b233b566534e225ad",
           "x-client-public-key": globalPublicKeyHex,
         },
@@ -56,18 +131,13 @@ export default function CustomPlayerPage() {
 
       if (!licenseRes.ok) throw new Error(`Lỗi kết nối License Server: Status ${licenseRes.status}`);
       
-      // Khôi phục mảng byte nhị phân phản hồi từ License Server
       const responseBuffer = new Uint8Array(await licenseRes.arrayBuffer());
       const payloadLen = (responseBuffer[0] << 24) | (responseBuffer[1] << 16) | (responseBuffer[2] << 8) | responseBuffer[3];
       const payloadBytes = responseBuffer.slice(4, 4 + payloadLen);
       const licenseData = JSON.parse(new TextDecoder().decode(payloadBytes));
-      
-      console.log("📥 [Client] Đã nhận dữ liệu mã hóa License thành công!");
 
-      // Helper hỗ trợ chuyển đổi chuỗi mã Hex thành Array vị trí Byte
       const hexToBytes = (hex: string) => new Uint8Array(hex.match(/.{1,2}/g)?.map((b: string) => parseInt(b, 16)) || []);
 
-      // 2. Nhập Public Key của Server vào RAM Client
       const serverPublicKey = await crypto.subtle.importKey(
         "raw", 
         hexToBytes(licenseData.serverPublicKeyHex || licenseData.serverPublicKey),
@@ -76,8 +146,7 @@ export default function CustomPlayerPage() {
         []
       );
 
-      // 3. 🔥 [ĐỒNG BỘ MẬT MÃ KDF]: Tính toán Shared Secret và băm SHA-256 như phía Server
-      console.log("🔐 [Crypto] Dẫn xuất Shared Secret và chạy hàm băm KDF SHA-256...");
+      setStatusLog("🔐 Dẫn xuất Shared Secret & tính toán KDF SHA-256...");
       const sharedSecretBits = await crypto.subtle.deriveBits(
         { name: "ECDH", public: serverPublicKey },
         globalKeyPair.privateKey,
@@ -85,208 +154,163 @@ export default function CustomPlayerPage() {
       );
 
       const hashedSecretBits = await crypto.subtle.digest("SHA-256", sharedSecretBits);
+      const derivedKey = await crypto.subtle.importKey("raw", hashedSecretBits, { name: "AES-GCM" }, false, ["decrypt"]);
 
-      const derivedKey = await crypto.subtle.importKey(
-        "raw",
-        hashedSecretBits,
-        { name: "AES-GCM" },
-        true, // Cần đặt là true để có thể exportKey kiểm tra gỡ lỗi
-        ["decrypt"]
-      );
-
-      // 4. Giải mã lớp bọc mật mã AES-GCM (Unwrap) để thu hồi khóa nội dung gốc (CEK)
       const ivBytes = hexToBytes(licenseData.ivHex || licenseData.iv);
       const wrappedBytes = hexToBytes(licenseData.encryptedCekHex || licenseData.wrappedCek);
 
-      // Gỡ lỗi in các tham số phía Browser
-      const exportedRaw = await crypto.subtle.exportKey("raw", derivedKey);
-      const aesKeyHex = Array.from(new Uint8Array(exportedRaw))
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
-      console.log("🛡️ [Client Debug] Client Public Key Hex:", globalPublicKeyHex);
-      console.log("🛡️ [Client Debug] Server Public Key Hex:", licenseData.serverPublicKeyHex || licenseData.serverPublicKey);
-      console.log("🛡️ [Client Debug] Derived AES Key (SHA-256 KDF) Hex:", aesKeyHex);
-      console.log("🛡️ [Client Debug] IV Hex:", licenseData.ivHex || licenseData.iv);
-      console.log("🛡️ [Client Debug] Wrapped CEK Hex:", licenseData.encryptedCekHex || licenseData.wrappedCek);
+      const cekBuffer = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: ivBytes, tagLength: 128 },
+        derivedKey,
+        wrappedBytes
+      );
 
-      let cekBuffer;
-      try {
-        cekBuffer = await crypto.subtle.decrypt(
-          { 
-            name: "AES-GCM", 
-            iv: ivBytes,
-            tagLength: 128 // 128 bits = 16 bytes chuẩn mã hóa Node.js sinh ra
-          },
-          derivedKey,
-          wrappedBytes
-        );
-        console.log("✅ [Web Crypto SUCCESS] Gỡ bọc ECDH lấy lại CEK bản rõ thành công rực rỡ!");
-      } catch (cryptoError) {
-        console.error("🚨 [Web Crypto FATAL] Không thể gỡ bọc do lệch cấu trúc mảng Byte:", cryptoError);
-        throw cryptoError;
-      }
-
-      console.log("✅ [Client] Tiến trình bóc tách mật mã thành công! Đã có khóa CEK bản rõ trên RAM.");
-
-      // =========================================================================
-      // 5. Tải tệp âm thanh phân đoạn segment.mp4 từ Cloudflare R2 / Local Gateway
-      // =========================================================================
-      console.log("📡 [Network] Đang tải trực tiếp file phân đoạn segment.mp4...");
-      const segmentUri = `http://localhost:3000/audio/segments/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4`;
+      setStatusLog("📡 Đang tải tệp âm thanh mã hóa phân đoạn CENC...");
+      const segmentUri = `http://localhost:3000/audio/segments/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4?nocache=${Date.now()}`;
 
       const encRes = await fetch(segmentUri, {
         method: 'GET',
-        mode: 'cors',
-        headers: { 'Accept': 'video/mp4,audio/mp4,*/*' }
+        cache: 'no-store',
+        headers: { 
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'Accept': 'video/mp4,audio/mp4,*/*' 
+        }
       });
       if (!encRes.ok) throw new Error("Không thể tải tệp âm thanh phân đoạn!");
       const encryptedAudioData = await encRes.arrayBuffer();
 
-      // =========================================================================
-      // 6. 🔥 [SỬA ĐỔI CHÍNH XÁC]: GIẢI MÃ NHẬN DIỆN HỘP ISO-BMFF (SAMPLE-LEVEL BYPASS)
-      // =========================================================================
-      console.log("🔐 [Crypto] Phân tích cấu trúc hộp MP4 để trích xuất khối dữ liệu mdat...");
+      setStatusLog("🔐 Đang bóc tách CENC và giải mã từng sample dữ liệu...");
       const view = new DataView(encryptedAudioData);
       const originalView = new Uint8Array(encryptedAudioData);
       
-      let moofOffset = -1;
-      let trunOffset = -1;
-      let sencOffset = -1;
-      let mdatOffset = -1;
-      let mdatSize = -1;
+      const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
       
-      for (let i = 0; i < encryptedAudioData.byteLength - 8; i++) {
-        const type = String.fromCharCode(originalView[i], originalView[i+1], originalView[i+2], originalView[i+3]);
+      const decryptedData = new Uint8Array(encryptedAudioData.byteLength);
+      decryptedData.set(new Uint8Array(encryptedAudioData));
+      
+      let offset = 0;
+      let activeTrunOffset = -1;
+      let activeSencOffset = -1;
+      
+      while (offset < encryptedAudioData.byteLength - 8) {
+        const size = view.getUint32(offset);
+        const type = String.fromCharCode(originalView[offset+4], originalView[offset+5], originalView[offset+6], originalView[offset+7]);
+        
         if (type === 'moof') {
-          moofOffset = i;
-        } else if (type === 'trun') {
-          trunOffset = i;
-        } else if (type === 'senc') {
-          sencOffset = i;
+          activeTrunOffset = -1;
+          activeSencOffset = -1;
+          
+          const findSubBoxes = (start: number, end: number) => {
+            let o = start;
+            while (o < end - 8) {
+              const s = view.getUint32(o);
+              const t = String.fromCharCode(originalView[o+4], originalView[o+5], originalView[o+6], originalView[o+7]);
+              if (t === 'traf') {
+                findSubBoxes(o + 8, o + s);
+              } else if (t === 'trun') {
+                activeTrunOffset = o;
+              } else if (t === 'senc') {
+                activeSencOffset = o;
+              }
+              o += s;
+            }
+          };
+          findSubBoxes(offset + 8, offset + size);
+          
         } else if (type === 'mdat') {
-          mdatOffset = i;
-          mdatSize = view.getUint32(mdatOffset - 4);
-        }
-      }
-      
-      let decryptedAudioBuffer: ArrayBuffer;
-      
-      if (moofOffset !== -1 && trunOffset !== -1 && sencOffset !== -1 && mdatOffset !== -1) {
-        moofOffset -= 4;
-        trunOffset -= 4;
-        sencOffset -= 4;
-        mdatOffset -= 4;
-        
-        console.log(`🎯 [MP4 Parser] Tìm thấy senc tại ${sencOffset}, trun tại ${trunOffset}, mdat tại ${mdatOffset}`);
-        
-        const sampleCount = view.getUint32(trunOffset + 12);
-        const flags = view.getUint32(trunOffset + 8) & 0x00FFFFFF;
-        
-        let currentIdx = trunOffset + 16;
-        const dataOffsetPresent = flags & 0x000001;
-        const firstSampleFlagsPresent = flags & 0x000004;
-        
-        if (dataOffsetPresent) currentIdx += 4;
-        if (firstSampleFlagsPresent) currentIdx += 4;
-        
-        const sampleSizes = [];
-        const sampleDurationPresent = flags & 0x000100;
-        const sampleSizePresent = flags & 0x000200;
-        const sampleFlagsPresent = flags & 0x000400;
-        const sampleCompositionTimeOffsetPresent = flags & 0x000800;
-        
-        let entrySize = 0;
-        if (sampleDurationPresent) entrySize += 4;
-        if (sampleSizePresent) entrySize += 4;
-        if (sampleFlagsPresent) entrySize += 4;
-        if (sampleCompositionTimeOffsetPresent) entrySize += 4;
-        
-        for (let j = 0; j < sampleCount; j++) {
-          let sIdx = currentIdx + j * entrySize;
-          let entryOffset = 0;
-          if (sampleDurationPresent) entryOffset += 4;
-          let size = sampleSizePresent ? view.getUint32(sIdx + entryOffset) : 0;
-          sampleSizes.push(size);
-        }
-        
-        const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
-        
-        let mdatDataOffset = mdatOffset + 8;
-        const decryptedMdat = new Uint8Array(mdatSize - 8);
-        let writeOffset = 0;
-        
-        for (let j = 0; j < sampleCount; j++) {
-          const size = sampleSizes[j];
-          const sampleIV = new Uint8Array(encryptedAudioData, sencOffset + 16 + j * 8, 8);
-          
-          const counter = new Uint8Array(16);
-          counter.set(sampleIV, 0);
-          
-          const ciphertext = encryptedAudioData.slice(mdatDataOffset, mdatDataOffset + size);
-          
-          const decryptedSample = await crypto.subtle.decrypt(
-            { name: "AES-CTR", counter: counter, length: 64 },
-            cryptoKey,
-            ciphertext
-          );
-          
-          decryptedMdat.set(new Uint8Array(decryptedSample), writeOffset);
-          mdatDataOffset += size;
-          writeOffset += size;
-        }
-        
-        const finalFileBuffer = new Uint8Array(encryptedAudioData.byteLength);
-        finalFileBuffer.set(originalView.subarray(0, mdatOffset + 8), 0);
-        finalFileBuffer.set(decryptedMdat, mdatOffset + 8);
-        if (originalView.byteLength > mdatOffset + mdatSize) {
-          finalFileBuffer.set(originalView.subarray(mdatOffset + mdatSize), mdatOffset + mdatSize);
-        }
-        
-        decryptedAudioBuffer = finalFileBuffer.buffer;
-        console.log(`✅ [Crypto] Giải mã CENC từng sample hoàn tất! Gộp file mp4: ${decryptedAudioBuffer.byteLength} bytes`);
-      } else {
-        console.warn("⚠️ [MP4 Parser] Không tìm thấy senc/trun/mdat riêng biệt, fallback giải mã toàn bộ file.");
-        const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
-        decryptedAudioBuffer = await crypto.subtle.decrypt(
-          { name: "AES-CTR", counter: new Uint8Array(16), length: 64 },
-          cryptoKey,
-          encryptedAudioData
-        );
-      }
-      
-      console.log("✅ [Crypto] Khôi phục cấu trúc âm thanh ISO-BMFF sạch thành công! Kích thước:", decryptedAudioBuffer.byteLength, "bytes");
-
-      // 7. Khởi chạy kiến trúc MediaSource (MSE) để bơm dữ liệu vào thẻ Audio ẩn mà không lo lỗi CENC 6006
-      const audio = audioRef.current;
-      if (!audio) return;
-
-      const mediaSource = new MediaSource();
-      mediaSourceRef.current = mediaSource;
-      audio.src = URL.createObjectURL(mediaSource);
-
-      mediaSource.addEventListener('sourceopen', () => {
-        // Khởi tạo kênh nạp dạng âm thanh MP4 với codec mã hóa chung audio/mp4
-        const sourceBuffer = mediaSource.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-        sourceBufferRef.current = sourceBuffer;
-
-        // Tiến hành bơm mảng byte âm thanh đã giải mã sạch hoàn toàn vào lõi phát trình duyệt
-        sourceBuffer.appendBuffer(decryptedAudioBuffer);
-
-        sourceBuffer.addEventListener('updateend', () => {
-          // Báo hiệu cho MediaSource biết đã nạp xong toàn bộ dữ liệu âm thanh và bắt đầu phát nhạc
-          if (mediaSource.readyState === 'open') {
-            mediaSource.endOfStream();
-            audio.play().then(() => {
-              setIsPlaying(true);
-              console.log("🎉 [Custom Player] Âm thanh đã được phát thành công!");
-            }).catch(e => console.error("Lỗi tự động phát âm thanh:", e));
+          if (activeTrunOffset !== -1 && activeSencOffset !== -1) {
+            const trunOffset = activeTrunOffset;
+            const sencOffset = activeSencOffset;
+            const sampleCount = view.getUint32(trunOffset + 12);
+            const flags = view.getUint32(trunOffset + 8) & 0x00FFFFFF;
+            
+            let currentIdx = trunOffset + 16;
+            if (flags & 0x000001) currentIdx += 4;
+            if (flags & 0x000004) currentIdx += 4;
+            
+            const sampleSizes = [];
+            const sampleDurationPresent = flags & 0x000100;
+            const sampleSizePresent = flags & 0x000200;
+            const sampleFlagsPresent = flags & 0x000400;
+            const sampleCompositionTimeOffsetPresent = flags & 0x000800;
+            
+            let entrySize = 0;
+            if (sampleDurationPresent) entrySize += 4;
+            if (sampleSizePresent) entrySize += 4;
+            if (sampleFlagsPresent) entrySize += 4;
+            if (sampleCompositionTimeOffsetPresent) entrySize += 4;
+            
+            for (let j = 0; j < sampleCount; j++) {
+              let sIdx = currentIdx + j * entrySize;
+              let entryOffset = sampleDurationPresent ? 4 : 0;
+              sampleSizes.push(sampleSizePresent ? view.getUint32(sIdx + entryOffset) : 0);
+            }
+            
+            let mdatDataOffset = offset + 8;
+            let writeOffset = offset + 8;
+            
+            for (let j = 0; j < sampleCount; j++) {
+              const s = sampleSizes[j];
+              const sampleIV = new Uint8Array(encryptedAudioData, sencOffset + 16 + j * 8, 8);
+              
+              const counter = new Uint8Array(16);
+              counter.set(sampleIV, 0);
+              
+              const ciphertext = encryptedAudioData.slice(mdatDataOffset, mdatDataOffset + s);
+              
+              const decryptedSample = await crypto.subtle.decrypt(
+                { name: "AES-CTR", counter: counter, length: 64 },
+                cryptoKey,
+                ciphertext
+              );
+              
+              decryptedData.set(new Uint8Array(decryptedSample), writeOffset);
+              mdatDataOffset += s;
+              writeOffset += s;
+            }
           }
+        }
+        offset += size;
+      }
+      
+      const decryptedAudioBuffer = decryptedData.buffer;
+
+      const audio = audioRef.current;
+      if (!audio) throw new Error("Thẻ Audio chưa sẵn sàng!");
+
+      setStatusLog("⚡ Đang tối ưu bộ đệm luồng RAM an toàn...");
+
+      const audioBlob = new Blob([decryptedAudioBuffer], { type: 'audio/mp4' });
+      const blobUrl = URL.createObjectURL(audioBlob);
+
+      audio.onplaying = () => {
+        setIsPlaying(true);
+        setStatusLog("🎉 Luồng âm thanh bảo mật đang phát trực tuyến!");
+        URL.revokeObjectURL(blobUrl);
+      };
+      
+      audio.onerror = () => {
+        console.error("Audio error code:", audio.error);
+        setStatusLog("❌ Trình duyệt từ chối giải mã luồng.");
+        try { URL.revokeObjectURL(blobUrl); } catch(e){}
+      };
+
+      audio.src = blobUrl;
+      // Giữ mức volume hiện tại của người dùng chọn
+      audio.volume = volume; 
+      audio.muted = false;
+
+      audio.play()
+        .catch(playErr => {
+          console.warn("Autoplay blocked:", playErr);
+          setStatusLog("⚠️ Hãy bấm nút ▶ trên trình phát để mồi âm thanh (Chrome Autoplay Policy).");
         });
-      });
 
     } catch (err: any) {
-      console.error("❌ Lỗi phát nhạc trên Custom Player:", err);
+      console.error("❌ Lỗi phát nhạc:", err);
       setError(err.message);
+      setStatusLog("❌ Luồng phát thất bại.");
     }
   };
 
@@ -295,53 +319,92 @@ export default function CustomPlayerPage() {
     if (audio) {
       audio.pause();
       audio.src = "";
-    }
-    if (mediaSourceRef.current && mediaSourceRef.current.readyState === 'open') {
-      mediaSourceRef.current.endOfStream();
+      audio.load();
     }
     setIsPlaying(false);
+    setCurrentTime("0:00");
+    setDuration("0:00");
+    setStatusLog("⏹ Đã dừng phát nhạc và giải phóng bộ nhớ RAM.");
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative">
+    <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative select-none">
+      
       <button onClick={() => router.push('/')} className="absolute top-6 left-6 flex items-center gap-2 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 hover:text-white transition-all duration-200 shadow-md">
         ✕ Quay lại
       </button>
 
-      <h1 className="text-3xl font-bold text-white mb-2">Custom Byte-Stream Player</h1>
-      <p className="text-gray-400 mb-10">Giải mã mảng byte nhị phân trực tiếp trên RAM | Đồ án Mật Mã NT219</p>
+      <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">Secure Audio Stream Player</h1>
+      <p className="text-gray-400 mb-10 text-sm font-medium">Đồ án Tốt Nghiệp / Mật Mã học NT219 - UIT</p>
       
-      <div className="w-full max-w-2xl bg-gray-900 rounded-2xl shadow-xl border border-gray-800 p-6 flex items-center gap-5 transition-all hover:border-gray-700">
-        <div className="w-20 h-20 bg-emerald-600 rounded-xl flex items-center justify-center shadow-md border-2 border-emerald-500">
-          <span className="text-white text-5xl font-mono">♪</span>
-        </div>
-        
-        <div className="flex-1 flex flex-col gap-4">
-          <div>
-            <p className="text-white font-bold text-lg">Secure Audio Stream (MSE Bypass DRM 6006)</p>
-            <p className="text-gray-500 text-sm">ECDH Private Key Derived Shared Secret → In-Memory AES-CTR Decryption</p>
+      <div className="w-full max-w-md bg-gray-900 rounded-2xl shadow-2xl border border-gray-800 p-6 flex flex-col gap-5 transition-all duration-300">
+        <div className="flex items-center gap-4">
+          <div className={`w-16 h-16 ${isPlaying ? 'bg-blue-600 animate-pulse border-blue-500' : 'bg-gray-800 border-gray-700'} rounded-xl flex items-center justify-center shadow-lg border-2 transition-all duration-300`}>
+            <span className="text-white text-3xl font-mono">♪</span>
           </div>
+          
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold text-base tracking-wide truncate">Encrypted Segment Audio Stream</p>
+            <p className="text-gray-500 text-[11px] mt-0.5 font-mono truncate">DRM: In-Memory ECDH + AES-CTR</p>
+          </div>
+        </div>
 
-          {/* Thẻ audio ẩn xử lý bằng MediaSource */}
-          <audio ref={audioRef} className="hidden" controlsList="nodownload"></audio>
+        {/* Thẻ audio ẩn hoàn toàn */}
+        <audio ref={audioRef} className="hidden" controlsList="nodownload"></audio>
 
-          <div className="flex gap-4">
-            <button onClick={playSong} disabled={isPlaying} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50 disabled:pointer-events-none transition-all shadow-md flex items-center gap-2">
-              ▶ Phát nhạc
-            </button>
-            <button onClick={stopPlay} disabled={!isPlaying} className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50 disabled:pointer-events-none transition-all shadow-md flex items-center gap-2">
-              ⏹ Dừng
-            </button>
-          </div> 
+        {/* BLOCK 1: Khung hiển thị thời gian số */}
+        <div className="flex items-center justify-between px-3 py-2 bg-gray-950/60 border border-gray-800/60 rounded-xl font-mono text-xs text-gray-400">
+          <span>Thời gian:</span>
+          <span className="text-blue-400 font-semibold">{currentTime} <span className="text-gray-600">/</span> {duration}</span>
+        </div>
+
+        {/* BLOCK 2: Khung điều chỉnh âm lượng (Loa to nhỏ) tự Custom */}
+        <div className="flex items-center gap-3 px-3 py-2.5 bg-gray-950/60 border border-gray-800/60 rounded-xl">
+          <button 
+            onClick={toggleMute} 
+            className="text-base hover:scale-110 active:scale-95 transition-transform duration-100"
+            title="Bấm để Tắt/Bật tiếng nhanh"
+          >
+            {getVolumeIcon()}
+          </button>
+          
+          <input 
+            type="range" 
+            min="0" 
+            max="1" 
+            step="0.05" 
+            value={volume} 
+            onChange={handleVolumeChange} 
+            className="flex-1 accent-blue-500 h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer" 
+          />
+          
+          <span className="font-mono text-[10px] text-gray-500 w-8 text-right">
+            {Math.round(volume * 100)}%
+          </span>
+        </div>
+
+        {/* BLOCK 3: Cụm nút điều khiển chính */}
+        <div className="flex gap-3 mt-1">
+          <button onClick={playSong} disabled={isPlaying} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-semibold text-sm disabled:opacity-40 disabled:pointer-events-none transition-all shadow-md flex items-center justify-center gap-2">
+            ▶ Giải mã & Phát
+          </button>
+          <button onClick={stopPlay} disabled={!isPlaying} className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 disabled:pointer-events-none transition-all border border-gray-700 shadow-md flex items-center justify-center gap-2">
+            ⏹ Dừng
+          </button>
         </div>
       </div>
       
-      {error && <div className="mt-6 w-full max-w-2xl p-4 bg-red-900/40 border border-red-800/60 text-red-300 rounded-xl shadow-inner text-sm">Lỗi: {error}</div>}
+      <div className="mt-5 w-full max-w-md p-3 bg-gray-900/60 border border-gray-800/80 rounded-xl shadow-inner flex items-center justify-between">
+        <span className="text-[11px] text-gray-400 font-medium">Hệ thống:</span>
+        <span className="text-[11px] font-mono font-semibold text-emerald-400 truncate max-w-[250px]">{statusLog}</span>
+      </div>
+
+      {error && <div className="mt-4 w-full max-w-md p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-xl shadow-inner text-xs font-mono">Lỗi thực thi: {error}</div>}
       
-      <div className="mt-6 w-full max-w-2xl p-4 bg-gray-900 rounded-xl border border-gray-800 shadow-md">
-        <p className="text-sm text-gray-400 font-semibold mb-1">🔐 Luồng an toàn mật mã học:</p>
-        <p className="text-xs text-gray-500 leading-relaxed">
-          Trao đổi khóa bất đối xứng ECDH (P-256) sinh ra Shared Secret ➔ Giải mã Gói tin mã hóa AES-GCM thu được khóa nội dung CEK thô trên RAM ➔ Hàm `crypto.subtle.decrypt` bóc sạch lớp mã hóa AES-CTR 128-bit của tệp tin `segment.mp4` và nạp thẳng mảng byte sạch vào MediaSourceBuffer để phát nhạc. Trình duyệt không kích hoạt EME bảo mật nên bẻ gãy hoàn toàn lỗi DRM 6006!
+      <div className="mt-6 w-full max-w-md p-4 bg-gray-950 rounded-xl border border-gray-900/40 text-center">
+        <p className="text-[11px] text-gray-600 leading-relaxed">
+          Cơ chế bảo mật: Dữ liệu âm thanh thô chỉ tồn tại dưới dạng phân mảnh nhị phân tạm thời trên RAM. 
+          Bằng cách thu hồi Object URL ngay khi vừa phát, hệ thống bẻ gãy hoàn toàn khả năng sao chép.
         </p>
       </div>
     </div>
