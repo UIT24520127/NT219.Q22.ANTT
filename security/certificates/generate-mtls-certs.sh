@@ -19,7 +19,7 @@
 
 set -e
 
-CERT_DIR="${MTLS_CERT_DIR:-.}/certs"
+CERT_DIR="${MTLS_CERT_DIR:-./security/nginx}/certs"
 CERT_VALIDITY_DAYS=365
 
 echo "========================================================================="
@@ -28,7 +28,7 @@ echo "========================================================================="
 
 # Create certificate directory
 mkdir -p "$CERT_DIR"
-chmod 700 "$CERT_DIR"
+chmod 755 "$CERT_DIR"
 
 echo "[1/5] Creating CA private key..."
 openssl genrsa -out "$CERT_DIR/ca-key.pem" 4096
@@ -58,8 +58,8 @@ openssl x509 -req -days $CERT_VALIDITY_DAYS \
 rm "$CERT_DIR/client.csr"
 
 # Set proper permissions
-chmod 400 "$CERT_DIR/ca-key.pem"
-chmod 400 "$CERT_DIR/client-key.pem"
+chmod 644 "$CERT_DIR/ca-key.pem"
+chmod 644 "$CERT_DIR/client-key.pem"
 chmod 444 "$CERT_DIR/ca-cert.pem"
 chmod 444 "$CERT_DIR/client-cert.pem"
 
