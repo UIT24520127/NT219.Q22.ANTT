@@ -26,7 +26,11 @@ export function wrapCekWithECDH(
   const sharedSecret = serverEcdh.computeSecret(clientPublicKeyBuffer);
 
   // 3. Dùng KDF (SHA-256) băm Shared Secret ra thành khóa đối xứng AES 256-bit
-  const aesKey = sharedSecret;
+  const aesKey = crypto.createHash('sha256').update(sharedSecret).digest();
+
+  console.log('🛡️ [Server Debug] Client Public Key Hex:', clientPublicKeyHex);
+  console.log('🛡️ [Server Debug] Server Public Key Hex:', serverPublicKeyHex);
+  console.log('🛡️ [Server Debug] Derived AES Key (SHA-256 KDF) Hex:', aesKey.toString('hex'));
 
   // 4. Mã hóa AES-256-GCM để bọc khóa CEK
   const iv = crypto.randomBytes(12); // Chuẩn mã hóa GCM dùng IV 12 bytes
@@ -34,7 +38,7 @@ export function wrapCekWithECDH(
 
   let wrappedCek = cipher.update(Buffer.from(plaintextCek, 'hex'));
   wrappedCek = Buffer.concat([wrappedCek, cipher.final()]);
-
+  
   // Lấy Authentication Tag để chống giả mạo gói tin
   const authTag = cipher.getAuthTag();
   const finalWrappedCekBuffer = Buffer.concat([wrappedCek, authTag]);
