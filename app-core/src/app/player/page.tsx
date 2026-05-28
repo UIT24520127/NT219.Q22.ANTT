@@ -1,102 +1,208 @@
 "use client";
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
-export default function PlayerPage() {
+let globalKeyPair: CryptoKeyPair | null = null;
+let globalPublicKeyHex = "";
+
+export default function CustomPlayerPage() {
+  const router = useRouter();
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Sử dụng ref cho thẻ HTMLAudioElement và MediaSource
   const audioRef = useRef<HTMLAudioElement>(null);
-  const playerRef = useRef<any>(null);
+  const mediaSourceRef = useRef<MediaSource | null>(null);
+  const sourceBufferRef = useRef<SourceBuffer | null>(null);
 
   useEffect(() => {
-    const initPlayer = async () => {
-      const shaka: any = await import('shaka-player/dist/shaka-player.compiled.js');
-      shaka.polyfill.installAll();
-
-      if (!shaka.Player.isBrowserSupported()) {
-        console.error('Trình duyệt của bạn không hỗ trợ Shaka Player!');
-        return;
+    const initECDH = async () => {
+      if (!globalKeyPair) {
+        console.log("🔑 [Client] Khởi tạo cặp khóa trao đổi ECDH (P-256)...");
+        globalKeyPair = await window.crypto.subtle.generateKey(
+          { name: "ECDH", namedCurve: "P-256" },
+          true,
+          ["deriveKey", "deriveBits"]
+        );
+        const exported = await window.crypto.subtle.exportKey("raw", globalKeyPair.publicKey);
+        globalPublicKeyHex = Array.from(new Uint8Array(exported))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+        console.log("✅ [Client] Public Key sẵn sàng đưa vào Header:", globalPublicKeyHex);
       }
+    };
+    initECDH();
+  }, []);
 
-      // =====================================================================
-      // 🔑 NÂNG CẤP TUẦN 3: TỰ ĐỘNG SINH CẶP KHÓA ĐỘNG ECDH (P-256)
-      // =====================================================================
-      console.log("🔑 Đang khởi tạo cặp khóa ECDH (P-256) dưới Client trình duyệt...");
-      const keyPair = await window.crypto.subtle.generateKey(
-        { name: "ECDH", namedCurve: "P-256" },
-        true,
-        ["deriveKey", "deriveBits"]
-      );
+  const playSong = async () => {
+    setError(null);
+    try {
+      if (!globalKeyPair) throw new Error("Hệ thống ECDH chưa khởi tạo xong!");
+
+      // 1. Gửi yêu cầu lấy License chứa wrapped CEK từ backend
+      console.log("📡 [Network] Đang gửi yêu cầu bắt tay lấy License...");
+      const token = localStorage.getItem('token') || 'mock-token-uit-2026';
       
-      const exportedPublicKey = await window.crypto.subtle.exportKey("raw", keyPair.publicKey);
-      const publicKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(exportedPublicKey)));
-      console.log("📌 Client Public Key gửi đi (Base64):", publicKeyBase64);
-      // =====================================================================
+      const licenseRes = await fetch("http://localhost:3000/api/license", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "authorization": `Bearer ${token}`,
+          // Sử dụng đúng KID đồng bộ với hệ thống file mã hóa trên R2 của ông
+          "x-kid": "75635febb8a5be6b233b566534e225ad",
+          "x-client-public-key": globalPublicKeyHex,
+        },
+        body: JSON.stringify({}),
+      });
 
+      if (!licenseRes.ok) throw new Error(`Lỗi kết nối License Server: Status ${licenseRes.status}`);
+      
+      // Khôi phục mảng byte nhị phân phản hồi từ License Server
+      const responseBuffer = new Uint8Array(await licenseRes.arrayBuffer());
+      const payloadLen = (responseBuffer[0] << 24) | (responseBuffer[1] << 16) | (responseBuffer[2] << 8) | responseBuffer[3];
+      const payloadBytes = responseBuffer.slice(4, 4 + payloadLen);
+      const licenseData = JSON.parse(new TextDecoder().decode(payloadBytes));
+      
+      console.log("📥 [Client] Đã nhận dữ liệu mã hóa License thành công!");
+
+      // Helper hỗ trợ chuyển đổi chuỗi mã Hex thành Array vị trí Byte
+      const hexToBytes = (hex: string) => new Uint8Array(hex.match(/.{1,2}/g)?.map((b: string) => parseInt(b, 16)) || []);
+
+      // 2. Nhập Public Key của Server vào RAM Client
+      const serverPublicKey = await crypto.subtle.importKey(
+        "raw", 
+        hexToBytes(licenseData.serverPublicKeyHex || licenseData.serverPublicKey),
+        { name: "ECDH", namedCurve: "P-256" }, 
+        false, 
+        []
+      );
+
+// 3. Tính toán Shared Secret Key (Khóa bí mật dùng chung) bằng thuật toán ECDH
+const sharedSecret = await crypto.subtle.deriveKey(
+  { name: "ECDH", public: serverPublicKey },
+  globalKeyPair.privateKey,
+  { name: "AES-GCM", length: 256 },
+  false,
+  ["decrypt"]
+);
+
+// 4. Giải mã lớp bọc mật mã AES-GCM (Unwrap) để thu hồi khóa nội dung gốc (CEK)
+const ivBytes = hexToBytes(licenseData.ivHex || licenseData.iv);
+const wrappedBytes = hexToBytes(licenseData.encryptedCekHex || licenseData.wrappedCek);
+
+const cekBuffer = await crypto.subtle.decrypt(
+  { name: "AES-GCM", iv: ivBytes },
+  sharedSecret,
+  wrappedBytes
+);
+
+      console.log("✅ [Client] Tiến trình bóc tách mật mã thành công! Đã có khóa CEK bản rõ trên RAM.");
+
+      // 5. Tải tệp âm thanh phân đoạn segment.mp4 từ Cloudflare R2 về RAM dưới dạng mảng byte
+      console.log("📡 [Network] Đang tải trực tiếp file phân đoạn segment.mp4 từ Cloudflare R2...");
+      // Ông cập nhật URL này trỏ chính xác về cổng Nginx gateway hoặc link public R2 của ông nhé
+      const segmentUri = 'http://localhost:80/audio/manifests/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4';
+      const encRes = await fetch(segmentUri);
+      if (!encRes.ok) throw new Error(`Không thể tải tệp âm thanh phân đoạn từ hạ tầng Cloudflare R2!`);
+      const encryptedAudioData = await encRes.arrayBuffer();
+
+      // 6. Thực hiện giải mã toàn bộ tệp âm thanh phân đoạn bằng thuật toán đối xứng AES-CTR 128-bit
+      console.log("🔐 [Crypto] Tiến hành giải mã luồng âm thanh đối xứng (AES-CTR)...");
+      const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
+      
+      const decryptedAudioBuffer = await crypto.subtle.decrypt(
+        { name: "AES-CTR", counter: new Uint8Array(16), length: 64 },
+        cryptoKey,
+        encryptedAudioData
+      );
+      console.log("✅ [Crypto] Khôi phục dữ liệu âm thanh sạch thành công! Kích thước:", decryptedAudioBuffer.byteLength, "bytes");
+
+      // 7. Khởi chạy kiến trúc MediaSource (MSE) để bơm dữ liệu vào thẻ Audio ẩn mà không lo lỗi CENC 6006
       const audio = audioRef.current;
       if (!audio) return;
 
-      const player = new shaka.Player(audio);
-      playerRef.current = player;
+      const mediaSource = new MediaSource();
+      mediaSourceRef.current = mediaSource;
+      audio.src = URL.createObjectURL(mediaSource);
 
-      player.getNetworkingEngine().registerRequestFilter((type: any, request: any) => {
-        if (type === shaka.net.NetworkingEngine.RequestType.LICENSE) {
-          console.log("🛑 Đã chặn bản tin Widevine Challenge gốc thành công!");
-          
-          const token = localStorage.getItem('token') || 'mock-token-uit-2026'; 
-          
-          request.headers['Authorization'] = `Bearer ${token}`;
-          request.headers['X-Client-Public-Key'] = publicKeyBase64;
-          
-          console.log("🚀 Đã đính kèm Bearer Token hợp lệ vào Header Authorization.");
-          console.log("🛡️ Đã đóng gói cặp khóa trao đổi ECDH chống nghe lén dữ liệu trên đường truyền.");
-          console.log("🔄 Đang bẻ lái request chạy thẳng về API nội bộ của nhóm...");
-          
-          request.uris = ['http://localhost:3000/api/license'];
-        }
+      mediaSource.addEventListener('sourceopen', () => {
+        // Khởi tạo kênh nạp dạng âm thanh MP4 với codec mã hóa chung audio/mp4
+        const sourceBuffer = mediaSource.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+        sourceBufferRef.current = sourceBuffer;
+
+        // Tiến hành bơm mảng byte âm thanh đã giải mã sạch hoàn toàn vào lõi phát trình duyệt
+        sourceBuffer.appendBuffer(decryptedAudioBuffer);
+
+        sourceBuffer.addEventListener('updateend', () => {
+          // Báo hiệu cho MediaSource biết đã nạp xong toàn bộ dữ liệu âm thanh và bắt đầu phát nhạc
+          if (mediaSource.readyState === 'open') {
+            mediaSource.endOfStream();
+            audio.play().then(() => {
+              setIsPlaying(true);
+              console.log("🎉 [Custom Player] Âm thanh đã được phát thành công!");
+            }).catch(e => console.error("Lỗi tự động phát âm thanh:", e));
+          }
+        });
       });
 
-      player.configure({
-        drm: {
-          servers: { 'com.widevine.alpha': 'http://localhost:3000/api/license' }
-        }
-      });
+    } catch (err: any) {
+      console.error("❌ Lỗi phát nhạc trên Custom Player:", err);
+      setError(err.message);
+    }
+  };
 
-      try {
-        const manifestUri = 'https://storage.googleapis.com/shaka-demo-assets/sintel-widevine/dash.mpd';
-        await player.load(manifestUri);
-        console.log('✅ Audio đã load thành công!');
-      } catch (e) {
-        console.error('❌ Lỗi khi load audio', e);
-      }
-    };
-
-    initPlayer();
-
-    return () => {
-      if (playerRef.current) playerRef.current.destroy();
-    };
-  }, []);
+  const stopPlay = () => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.src = "";
+    }
+    if (mediaSourceRef.current && mediaSourceRef.current.readyState === 'open') {
+      mediaSourceRef.current.endOfStream();
+    }
+    setIsPlaying(false);
+  };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 p-6">
-      <h1 className="text-3xl font-bold text-white mb-2">DRM Secure Player</h1>
-      <p className="text-gray-400 mb-10">Hệ thống Trình phát nhạc chống tải lậu - Tuần 3 (Advanced Security)</p>
+    <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative">
+      <button onClick={() => router.push('/')} className="absolute top-6 left-6 flex items-center gap-2 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 hover:text-white transition-all duration-200 shadow-md">
+        ✕ Quay lại
+      </button>
+
+      <h1 className="text-3xl font-bold text-white mb-2">Custom Byte-Stream Player</h1>
+      <p className="text-gray-400 mb-10">Giải mã mảng byte nhị phân trực tiếp trên RAM | Đồ án Mật Mã NT219</p>
       
-      {/* GIAO DIỆN CHUẨN AUDIO */}
       <div className="w-full max-w-2xl bg-gray-900 rounded-2xl shadow-xl border border-gray-800 p-6 flex items-center gap-5 transition-all hover:border-gray-700">
-        <div className="w-20 h-20 bg-blue-600 rounded-xl flex items-center justify-center shadow-md border-2 border-blue-500">
+        <div className="w-20 h-20 bg-emerald-600 rounded-xl flex items-center justify-center shadow-md border-2 border-emerald-500">
           <span className="text-white text-5xl font-mono">♪</span>
         </div>
         
-        <div className="flex-1 flex flex-col gap-2">
-            <p className="text-white font-bold text-lg">Sintel - Widevine Stream Test</p>
-            <p className="text-gray-500 text-sm mb-2">UIT Music DRM Project</p>
-            <audio
-              ref={audioRef}
-              className="w-full h-10"
-              controls
-              autoPlay
-              controlsList="nodownload"
-            ></audio>
+        <div className="flex-1 flex flex-col gap-4">
+          <div>
+            <p className="text-white font-bold text-lg">Secure Audio Stream (MSE Bypass DRM 6006)</p>
+            <p className="text-gray-500 text-sm">ECDH Private Key Derived Shared Secret → In-Memory AES-CTR Decryption</p>
+          </div>
+
+          {/* Thẻ audio ẩn xử lý bằng MediaSource */}
+          <audio ref={audioRef} className="hidden" controlsList="nodownload"></audio>
+
+          <div className="flex gap-4">
+            <button onClick={playSong} disabled={isPlaying} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50 disabled:pointer-events-none transition-all shadow-md flex items-center gap-2">
+              ▶ Phát nhạc
+            </button>
+            <button onClick={stopPlay} disabled={!isPlaying} className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl font-semibold disabled:opacity-50 disabled:pointer-events-none transition-all shadow-md flex items-center gap-2">
+              ⏹ Dừng
+            </button>
+          </div> 
         </div>
+      </div>
+      
+      {error && <div className="mt-6 w-full max-w-2xl p-4 bg-red-900/40 border border-red-800/60 text-red-300 rounded-xl shadow-inner text-sm">Lỗi: {error}</div>}
+      
+      <div className="mt-6 w-full max-w-2xl p-4 bg-gray-900 rounded-xl border border-gray-800 shadow-md">
+        <p className="text-sm text-gray-400 font-semibold mb-1">🔐 Luồng an toàn mật mã học:</p>
+        <p className="text-xs text-gray-500 leading-relaxed">
+          Trao đổi khóa bất đối xứng ECDH (P-256) sinh ra Shared Secret ➔ Giải mã Gói tin mã hóa AES-GCM thu được khóa nội dung CEK thô trên RAM ➔ Hàm `crypto.subtle.decrypt` bóc sạch lớp mã hóa AES-CTR 128-bit của tệp tin `segment.mp4` và nạp thẳng mảng byte sạch vào MediaSourceBuffer để phát nhạc. Trình duyệt không kích hoạt EME bảo mật nên bẻ gãy hoàn toàn lỗi DRM 6006!
+        </p>
       </div>
     </div>
   );

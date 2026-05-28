@@ -92,22 +92,23 @@ export async function POST(request: Request) {
 
     // 4. Decrypt CEK from OpenBao KMS (Envelope Encryption pattern)
     console.log('🔓 [License] Decrypting CEK from OpenBao...');
-    const plaintextCek = await kmsService.decryptKey(encryptedCek);
+    // Thêm hàm .trim() để dọn sạch hoàn toàn khoảng trắng, xuống dòng rác phát sinh
+    const plaintextCek = (await kmsService.decryptKey(encryptedCek)).trim();
 
-    // Validate CEK format (should be 64 hex characters for 256-bit key)
-    if (plaintextCek.length !== 64 || !/^[0-9a-f]+$/i.test(plaintextCek)) {
-      console.error('❌ [License] Invalid CEK format after decryption');
+    // ĐÃ SỬA: Khóa AES thô của bài nhạc dài đúng 32 ký tự Hex (128-bit)
+    if (plaintextCek.length !== 32 || !/^[0-9a-f]+$/i.test(plaintextCek)) {
+      console.error(`❌ [License] Invalid CEK format after decryption. Got length: ${plaintextCek.length}`);
       throw new Error('Invalid CEK format');
     }
 
     console.log(`✅ [License] CEK decrypted successfully for KID: ${kid}`);
 
-// =========================================================================
+    // =========================================================================
     // 🔥 [MÃ NGUỒN NGƯỜI A - TUẦN 3]: GỌI TỪ FILE ECDH.TS SANG ĐỂ WRAPPING KHÓA
     // =========================================================================
     console.log('🛡️ [License - Người A] Đang gọi module mật mã từ file ecdh.ts...');
 
-    // Gọi hàm từ module ecdh để bọc khóa CEK
+    // Gọi hàm từ module ecdh để bọc khóa CEK (Đã khớp định dạng chuỗi Hex chuẩn)
     const { serverPublicKeyHex, wrappedCekHex, ivHex } = wrapCekWithECDH(
       clientPublicKeyHex,
       plaintextCek
@@ -120,26 +121,32 @@ export async function POST(request: Request) {
     // =========================================================================
     const licensePayload = {
       kid: kid,
-      wrappedCek: wrappedCekHex,        // Nhận chuỗi Hex từ hàm wrapCekWithECDH
-      serverPublicKey: serverPublicKeyHex, // Nhận chuỗi Hex từ hàm wrapCekWithECDH
-      iv: ivHex,                        // Nhận chuỗi Hex từ hàm wrapCekWithECDH
+      wrappedCek: wrappedCekHex,        
+      serverPublicKey: serverPublicKeyHex, 
+      iv: ivHex,                        
       issuedAt: Date.now(),
       ttl: 3600
     };
     const licensePayloadBuffer = Buffer.from(JSON.stringify(licensePayload));
-
     // =========================================================================
-    // 4. KÝ SỐ RSA-SHA256 CHỐNG GIẢ MẠO BẢN TIN (Kế thừa logic Tuần 2)
+    // 4. KÝ SỐ ECDSA-SHA256 CHỐNG GIẢ MẠO BẢN TIN (Thay thế hoàn toàn RSA 2048)
     // =========================================================================
-    // Lưu ý: Sinh khóa RSA động dạng fallback để biên dịch không lỗi, 
-    // Nếu dự án có file private-key.pem, hãy dùng fs.readFileSync để thay thế chuỗi này
-    const { privateKey } = crypto.generateKeyPairSync('rsa', {
-      modulusLength: 2048,
+    // Sinh cặp khóa Elliptic Curve (ECDSA) động sử dụng curve prime256v1
+    const { privateKey } = crypto.generateKeyPairSync('ec' as any, {
+      namedCurve: 'prime256v1',
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem'
+      }
     });
 
-    const signer = crypto.createSign('RSA-SHA256');
+    // Thực hiện ký số bằng thuật toán ECDSA với hàm băm SHA-256
+    const signer = crypto.createSign('SHA-256');
     signer.update(licensePayloadBuffer);
-    const signatureBuffer = signer.sign(privateKey);
+    const signatureBuffer = signer.sign({
+      key: privateKey,
+      dsaEncoding: 'ieee-p1363'
+    });
 
     // 5. Đóng gói cấu trúc mảng nhị phân đồng nhất (4 bytes độ dài + Payload + Chữ ký)
     const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
@@ -147,9 +154,9 @@ export async function POST(request: Request) {
     licensePayloadBuffer.copy(finalLicenseBuffer, 4); 
     signatureBuffer.copy(finalLicenseBuffer, 4 + licensePayloadBuffer.length);
 
-    console.log(`📦 [LicenseProxy - Người A] Hoàn tất bọc ECDH + Chữ ký RSA thành công! Size: ${finalLicenseBuffer.length} bytes`);
+    console.log(`📦 [LicenseProxy - Người A] Hoàn tất bọc ECDH + Ký số ECDSA Curve thành công! Size: ${finalLicenseBuffer.length} bytes`);
 
-    // 6. Ghi nhận lịch sử hệ thống (Giữ nguyên của bạn B)
+    // 6. Ghi nhận lịch sử hệ thống 
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
 
     // 7. Trả dữ liệu mã hóa nhị phân về cho Shaka Player
@@ -158,16 +165,23 @@ export async function POST(request: Request) {
         'Content-Type': 'application/octet-stream',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id, x-client-public-key', // Đã mở khóa cors nhận diện public key từ Client
+        'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id, x-client-public-key', 
       },
     });
 
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error('❌ [License] Error in license proxy:', message);
+    // BẪY LOG CHI TIẾT TẠI ĐÂY:
+    console.error('💥💥💥 [License CRITICAL ERROR] Phát hiện sập luồng Backend!');
+    if (error instanceof Error) {
+      console.error('Chi tiết lỗi:', error.message);
+      console.error('Vị trí phát sinh lỗi (Stack Trace):', error.stack);
+    } else {
+      console.error('Lỗi không xác định:', error);
+    }
+
     return NextResponse.json({ 
       error: 'License generation failed',
-      details: process.env.NODE_ENV === 'development' ? message : undefined
+      details: error instanceof Error ? error.message : "Unknown error"
     }, { status: 500 });
   }
 }

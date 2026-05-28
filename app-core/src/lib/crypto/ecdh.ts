@@ -34,7 +34,7 @@ export function wrapCekWithECDH(
 
   let wrappedCek = cipher.update(Buffer.from(plaintextCek, 'hex'));
   wrappedCek = Buffer.concat([wrappedCek, cipher.final()]);
-  
+
   // Lấy Authentication Tag để chống giả mạo gói tin
   const authTag = cipher.getAuthTag();
   const finalWrappedCekBuffer = Buffer.concat([wrappedCek, authTag]);

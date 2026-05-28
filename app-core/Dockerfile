@@ -39,10 +39,15 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install runtime dependencies only
+# ----------------------------------------------------------------------------
+# 🔥 VÁ LỖI CỐT LÕI: Cài các công cụ chạy nền bao gồm cả Shaka Packager
+# ----------------------------------------------------------------------------
 RUN apk add --no-cache \
     ffmpeg \
-    curl
+    curl \
+    libc6-compat && \
+    curl -L https://github.com/shaka-project/shaka-packager/releases/download/v3.2.0/packager-linux-x64 -o /usr/local/bin/packager && \
+    chmod +x /usr/local/bin/packager
 
 # Copy package files from builder
 COPY package*.json ./
@@ -87,7 +92,7 @@ ENV PORT=3000
 # ============================================================================
 # Start Application
 # ============================================================================
-CMD ["node_modules/.bin/next", "start"]
+CMD ["npm", "run", "dev"]
 
 # ============================================================================
 # Docker Build & Run Instructions:
