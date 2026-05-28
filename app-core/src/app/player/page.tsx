@@ -335,7 +335,7 @@ export default function CustomPlayerPage() {
       </button>
 
       <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">Secure Audio Stream Player</h1>
-      <p className="text-gray-400 mb-10 text-sm font-medium">Đồ án Tốt Nghiệp / Mật Mã học NT219 - UIT</p>
+      <p className="text-gray-400 mb-10 text-sm font-medium">Mật Mã học NT219 - UIT</p>
       
       <div className="w-full max-w-md bg-gray-900 rounded-2xl shadow-2xl border border-gray-800 p-6 flex flex-col gap-5 transition-all duration-300">
         <div className="flex items-center gap-4">
