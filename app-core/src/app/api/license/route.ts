@@ -191,8 +191,8 @@ export async function OPTIONS(request: Request) {
   return new NextResponse(null, {
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, x-kid, x-track-id, x-client-public-key', // ĐÃ BỔ SUNG KHÓA CÔNG KHAI CLIENT Ở ĐÂY
     },
   });
 }

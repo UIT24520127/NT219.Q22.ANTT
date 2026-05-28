@@ -89,40 +89,33 @@ const sharedSecret = await crypto.subtle.deriveKey(
 const ivBytes = hexToBytes(licenseData.ivHex || licenseData.iv);
 const wrappedBytes = hexToBytes(licenseData.encryptedCekHex || licenseData.wrappedCek);
 
-const cekBuffer = await crypto.subtle.decrypt(
-  { name: "AES-GCM", iv: ivBytes },
-  sharedSecret,
-  wrappedBytes
-);
+let cekBuffer;
+try {
+  // BỔ SUNG CHÍNH XÁC THAM SỐ tagLength: 128 Ở ĐÂY
+  cekBuffer = await crypto.subtle.decrypt(
+    { 
+      name: "AES-GCM", 
+      iv: ivBytes,
+      tagLength: 128 // 128 bits = 16 bytes chuẩn mã hóa Node.js sinh ra
+    },
+    sharedSecret,
+    wrappedBytes
+  );
+  console.log("✅ [Web Crypto SUCCESS] Gỡ bọc ECDH lấy lại CEK bản rõ thành công rực rỡ!");
+} catch (cryptoError) {
+  console.error("🚨 [Web Crypto FATAL] Không thể gỡ bọc do lệch cấu trúc mảng Byte:", cryptoError);
+  throw cryptoError;
+}
 
       console.log("✅ [Client] Tiến trình bóc tách mật mã thành công! Đã có khóa CEK bản rõ trên RAM.");
 
-      // 5. Tải tệp âm thanh phân đoạn segment.mp4 từ Cloudflare R2 về RAM dưới dạng mảng byte
-      console.log("📡 [Network] Đang tải trực tiếp file phân đoạn segment.mp4 từ Cloudflare R2...");
-      // Ông cập nhật URL này trỏ chính xác về cổng Nginx gateway hoặc link public R2 của ông nhé
-      const segmentUri = 'http://localhost:80/audio/manifests/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4';
-      const encRes = await fetch(segmentUri);
-      if (!encRes.ok) throw new Error(`Không thể tải tệp âm thanh phân đoạn từ hạ tầng Cloudflare R2!`);
-      const encryptedAudioData = await encRes.arrayBuffer();
+      // =========================================================================
+// 5. Tải tệp âm thanh phân đoạn segment.mp4 từ Cloudflare R2 / Local Gateway
+// =========================================================================
+console.log("📡 [Network] Đang tải trực tiếp file phân đoạn segment.mp4...");
+const segmentUri = `http://localhost:3000/audio/segments/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4`;
 
-      // 6. Thực hiện giải mã toàn bộ tệp âm thanh phân đoạn bằng thuật toán đối xứng AES-CTR 128-bit
-      console.log("🔐 [Crypto] Tiến hành giải mã luồng âm thanh đối xứng (AES-CTR)...");
-      const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
-      
-      const decryptedAudioBuffer = await crypto.subtle.decrypt(
-        { name: "AES-CTR", counter: new Uint8Array(16), length: 64 },
-        cryptoKey,
-        encryptedAudioData
-      );
-      console.log("✅ [Crypto] Khôi phục dữ liệu âm thanh sạch thành công! Kích thước:", decryptedAudioBuffer.byteLength, "bytes");
 
-      // 7. Khởi chạy kiến trúc MediaSource (MSE) để bơm dữ liệu vào thẻ Audio ẩn mà không lo lỗi CENC 6006
-      const audio = audioRef.current;
-      if (!audio) return;
-
-      const mediaSource = new MediaSource();
-      mediaSourceRef.current = mediaSource;
-      audio.src = URL.createObjectURL(mediaSource);
 
       mediaSource.addEventListener('sourceopen', () => {
         // Khởi tạo kênh nạp dạng âm thanh MP4 với codec mã hóa chung audio/mp4
