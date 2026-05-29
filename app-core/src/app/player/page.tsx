@@ -1,30 +1,72 @@
 "use client";
 import React, { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 let globalKeyPair: CryptoKeyPair | null = null;
 let globalPublicKeyHex = "";
+let isPipelineActiveGlobal = false;
 
 export default function CustomPlayerPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusLog, setStatusLog] = useState<string>("Hệ thống sẵn sàng...");
-  
-  // State quản lý thời gian và âm lượng tự custom
+
   const [currentTime, setCurrentTime] = useState("0:00");
   const [duration, setDuration] = useState("0:00");
-  const [volume, setVolume] = useState(1.0); // Mức âm lượng mặc định: 100% (1.0)
+  const [volume, setVolume] = useState(1.0);
 
   const audioRef = useRef<HTMLAudioElement>(null);
+  const mediaSourceRef = useRef<MediaSource | null>(null);
+  const sourceBufferRef = useRef<SourceBuffer | null>(null);
 
-  // Hàm helper định dạng số giây thành dạng mm:ss
+  const cryptoKeyRef = useRef<CryptoKey | null>(null);
+  const currentSegmentIndexRef = useRef(1);
+  const isFetchingRef = useRef(false);
+  const [isLoadingStream, setIsLoadingStream] = useState(false);
+
+  const [songTitle, setSongTitle] = useState<string>("Đang tải dữ liệu...");
+  const [trackId, setTrackId] = useState<string>("");
+  const [targetKID, setTargetKID] = useState<string>("");
+  const [totalSegments, setTotalSegments] = useState<number>(1);
+
+  // ✅ Refs để tránh closure stale trong checkAndBufferNext
+  const totalSegmentsRef = useRef<number>(1);
+  const trackIdRef = useRef<string>("");
+  useEffect(() => { totalSegmentsRef.current = totalSegments; }, [totalSegments]);
+  useEffect(() => { trackIdRef.current = trackId; }, [trackId]);
+
   const formatTime = (secs: number) => {
-    if (isNaN(secs)) return "0:00";
-    const minutes = Math.floor(secs / 60);
-    const seconds = Math.floor(secs % 60);
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    if (isNaN(secs) || secs === Infinity) return "0:00";
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
   };
+
+  useEffect(() => {
+    const fetchTrackMetadata = async () => {
+      const id = searchParams.get('trackId') || "791a86f0-6b1e-4440-bd29-bdc44c9fdb8f";
+      setTrackId(id);
+      trackIdRef.current = id;
+      try {
+        setStatusLog("🔍 Đang truy vấn Metadata bài hát...");
+        const res = await fetch(`/api/ingest/upload?trackId=${id}`);
+        if (!res.ok) throw new Error("Không tìm thấy thông tin bài hát");
+        const json = await res.json();
+        const trackData = json.data.track;
+        setSongTitle(trackData.filename);
+        setTargetKID(trackData.kid);
+        const calc = Math.max(1, Math.ceil(trackData.duration / 10));
+        setTotalSegments(calc);
+        totalSegmentsRef.current = calc;
+        setStatusLog(`✅ Đã nạp: ${calc} phân đoạn.`);
+      } catch (err: any) {
+        setError("Lỗi nạp bài hát: " + err.message);
+      }
+    };
+    fetchTrackMetadata();
+  }, [searchParams]);
 
   useEffect(() => {
     const initECDH = async () => {
@@ -32,381 +74,472 @@ export default function CustomPlayerPage() {
         if (!globalKeyPair) {
           setStatusLog("🔑 Đang khởi tạo cặp khóa ECDH (P-256)...");
           globalKeyPair = await window.crypto.subtle.generateKey(
-            { name: "ECDH", namedCurve: "P-256" },
-            true,
-            ["deriveKey", "deriveBits"]
+            { name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey", "deriveBits"]
           );
           const exported = await window.crypto.subtle.exportKey("raw", globalKeyPair.publicKey);
           globalPublicKeyHex = Array.from(new Uint8Array(exported))
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
-          setStatusLog("✅ Hệ thống mật mã ECDH đã sẵn sàng trên RAM.");
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+          setStatusLog("✅ Hệ thống mật mã ECDH sẵn sàng.");
         }
       } catch (err: any) {
-        setError("Lỗi khởi tạo hệ thống mật mã: " + err.message);
+        setError("Lỗi khởi tạo ECDH: " + err.message);
       }
     };
     initECDH();
-
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.src = "";
-        audioRef.current.load();
-      }
-    };
+    return () => { resetStreaming(); };
   }, []);
 
-  // Lắng nghe cập nhật từ thẻ audio ngầm
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-
-    const handleTimeUpdate = () => {
-      setCurrentTime(formatTime(audio.currentTime));
-    };
-
-    const handleLoadedMetadata = () => {
-      setDuration(formatTime(audio.duration));
-    };
-
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-
-    return () => {
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-    };
+    const onTime = () => setCurrentTime(formatTime(audio.currentTime));
+    const onMeta = () => { if (audio.duration && audio.duration !== Infinity) setDuration(formatTime(audio.duration)); };
+    audio.addEventListener('timeupdate', onTime);
+    audio.addEventListener('loadedmetadata', onMeta);
+    return () => { audio.removeEventListener('timeupdate', onTime); audio.removeEventListener('loadedmetadata', onMeta); };
   }, []);
 
-  // Hàm xử lý khi kéo thanh volume
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVolume = parseFloat(e.target.value);
-    setVolume(newVolume);
-    if (audioRef.current) {
-      audioRef.current.volume = newVolume;
-    }
+    const v = parseFloat(e.target.value);
+    setVolume(v);
+    if (audioRef.current) audioRef.current.volume = v;
   };
 
-  // Hàm click vào icon loa để Mute nhanh hoặc Unmute
-  const toggleMute = () => {
-    if (audioRef.current) {
-      if (volume > 0) {
-        setVolume(0);
-        audioRef.current.volume = 0;
-      } else {
-        setVolume(1.0);
-        audioRef.current.volume = 1.0;
+  const resetStreaming = () => {
+    const audio = audioRef.current;
+    if (audio) { audio.pause(); audio.src = ""; try { audio.load(); } catch (e) { } }
+    mediaSourceRef.current = null;
+    sourceBufferRef.current = null;
+    currentSegmentIndexRef.current = 1;
+    cryptoKeyRef.current = null;
+    isFetchingRef.current = false;
+    setIsPlaying(false);
+  };
+
+  // =========================================================================
+  // ✅ GIẢI MÃ CENC ĐÚNG CHUẨN: Per-sample AES-CTR với IV từ senc box
+  //
+  // Cấu trúc đã xác nhận từ binary analysis:
+  // - scheme = 'cenc' (AES-CTR, không phải cbcs)
+  // - IV size = 8 bytes per sample (tenc: default_Per_Sample_IV_Size = 8)
+  // - IV sequential: sample[n] = sample[0] + n (tăng +1 mỗi sample)
+  // - IVs lưu trong senc box bên trong traf của moof
+  // - trun có sample_size_present → parse được offset từng sample trong mdat
+  // - segment_1 KHÔNG có senc → CLEAR, không cần decrypt
+  // =========================================================================
+  const decryptSegment = async (
+    segmentBuffer: ArrayBuffer,
+    cryptoKey: CryptoKey,
+    segmentIndex: number
+  ): Promise<ArrayBuffer> => {
+    const data = new Uint8Array(segmentBuffer);
+
+    // ── Helper: đọc u32 big-endian
+    const u32 = (off: number) =>
+      ((data[off] << 24) | (data[off + 1] << 16) | (data[off + 2] << 8) | data[off + 3]) >>> 0;
+
+    // ── Helper: tìm box theo tên, trả về {offset vào content, size của box}
+    const findBox = (haystack: Uint8Array, name: string, startAt = 0): { start: number; size: number } | null => {
+      const needle = name.split('').map(c => c.charCodeAt(0));
+      let i = startAt;
+      while (i + 8 <= haystack.length) {
+        const sz = ((haystack[i] << 24) | (haystack[i + 1] << 16) | (haystack[i + 2] << 8) | haystack[i + 3]) >>> 0;
+        if (sz < 8 || i + sz > haystack.length) break;
+        if (haystack[i + 4] === needle[0] && haystack[i + 5] === needle[1] &&
+          haystack[i + 6] === needle[2] && haystack[i + 7] === needle[3]) {
+          return { start: i, size: sz };
+        }
+        i += sz;
+      }
+      return null;
+    };
+
+    // ── Tìm moof và mdat
+    const moofBox = findBox(data, 'moof');
+    const mdatBox = moofBox ? findBox(data, 'mdat', moofBox.start + moofBox.size) : null;
+
+    if (!moofBox || !mdatBox) {
+      console.warn(`⚠️ seg${segmentIndex}: không tìm thấy moof/mdat, trả về nguyên bản`);
+      return segmentBuffer;
+    }
+
+    const moofContent = data.subarray(moofBox.start + 8, moofBox.start + moofBox.size);
+
+    // ── Tìm traf bên trong moof
+    const trafBox = findBox(moofContent, 'traf');
+    if (!trafBox) {
+      console.warn(`⚠️ seg${segmentIndex}: không có traf → clear segment, bỏ qua decrypt`);
+      return segmentBuffer;
+    }
+    const trafContent = moofContent.subarray(trafBox.start + 8, trafBox.start + trafBox.size);
+
+    // ── Tìm senc trong traf
+    const sencBox = findBox(trafContent, 'senc');
+    if (!sencBox) {
+      // Segment 1 (clear) — không có senc, trả về nguyên bản
+      console.log(`ℹ️ seg${segmentIndex}: không có senc → CLEAR segment`);
+      return segmentBuffer;
+    }
+
+    const sencContent = trafContent.subarray(sencBox.start + 8, sencBox.start + sencBox.size);
+    const sencVersion = sencContent[0];
+    const sencFlags = ((sencContent[1] << 16) | (sencContent[2] << 8) | sencContent[3]) >>> 0;
+    const sampleCount = ((sencContent[4] << 24) | (sencContent[5] << 16) | (sencContent[6] << 8) | sencContent[7]) >>> 0;
+
+    // Đọc IV 8-byte của từng sample từ senc
+    const ivList: bigint[] = [];
+    let sencOff = 8;
+    for (let s = 0; s < sampleCount; s++) {
+      // IV 8 bytes dạng big-endian → đọc thành BigInt
+      let iv = BigInt(0);
+      for (let b = 0; b < 8; b++) iv = (iv << BigInt(8)) | BigInt(sencContent[sencOff + b]);
+      ivList.push(iv);
+      sencOff += 8;
+      if (sencFlags & 0x2) {
+        // has_subsample_encryption_info: skip subsample entries
+        const subCount = (sencContent[sencOff] << 8) | sencContent[sencOff + 1];
+        sencOff += 2 + subCount * 6;
       }
     }
-  };
 
-  // Helper hiển thị Icon Loa linh hoạt theo mức âm lượng
-  const getVolumeIcon = () => {
-    if (volume === 0) return "🔇";
-    if (volume < 0.4) return "🔈";
-    if (volume < 0.7) return "🔉";
-    return "🔊";
+    // ── Tìm trun trong traf để lấy sample sizes
+    const trunBox = findBox(trafContent, 'trun');
+    if (!trunBox) {
+      console.warn(`⚠️ seg${segmentIndex}: không có trun`);
+      return segmentBuffer;
+    }
+    const trunContent = trafContent.subarray(trunBox.start + 8, trunBox.start + trunBox.size);
+    const trunVersion = trunContent[0];
+    const trunFlags = ((trunContent[1] << 16) | (trunContent[2] << 8) | trunContent[3]) >>> 0;
+    const trunSampleCount = ((trunContent[4] << 24) | (trunContent[5] << 16) | (trunContent[6] << 8) | trunContent[7]) >>> 0;
+
+    const hasDO = !!(trunFlags & 0x001);
+    const hasFF = !!(trunFlags & 0x004);
+    const hasDur = !!(trunFlags & 0x100);
+    const hasSz = !!(trunFlags & 0x200);
+    const hasSF = !!(trunFlags & 0x400);
+    const hasCT = !!(trunFlags & 0x800);
+
+    let trunOff = 8;
+    if (hasDO) trunOff += 4;
+    if (hasFF) trunOff += 4;
+
+    // Đọc sample sizes
+    const sampleSizes: number[] = [];
+    for (let s = 0; s < trunSampleCount; s++) {
+      if (hasDur) trunOff += 4;
+      if (hasSz) {
+        const sz = ((trunContent[trunOff] << 24) | (trunContent[trunOff + 1] << 16) |
+          (trunContent[trunOff + 2] << 8) | trunContent[trunOff + 3]) >>> 0;
+        sampleSizes.push(sz);
+        trunOff += 4;
+      }
+      if (hasSF) trunOff += 4;
+      if (hasCT) trunOff += 4;
+    }
+
+    if (sampleSizes.length === 0 || sampleSizes.length !== sampleCount) {
+      console.warn(`⚠️ seg${segmentIndex}: sample sizes không khớp senc (${sampleSizes.length} vs ${sampleCount})`);
+      return segmentBuffer;
+    }
+
+    // ── Decrypt từng sample trong mdat
+    const mdatPayloadStart = mdatBox.start + 8;
+    const result = new Uint8Array(segmentBuffer.byteLength);
+    // Copy toàn bộ trước (giữ nguyên header boxes)
+    result.set(data);
+
+    let mdatOffset = 0;
+    for (let s = 0; s < sampleCount; s++) {
+      const sampleSize = sampleSizes[s];
+      const sampleStart = mdatPayloadStart + mdatOffset;
+
+      // Tạo 16-byte counter block: [8-byte IV big-endian] + [8 zero bytes]
+      const counterBlock = new Uint8Array(16);
+      const iv64 = ivList[s];
+      for (let b = 0; b < 8; b++) {
+        counterBlock[b] = Number((iv64 >> BigInt(56 - b * 8)) & BigInt(0xFF));
+      }
+      // counterBlock[8..15] = 0 (đã là 0)
+
+      try {
+        const decryptedSample = await crypto.subtle.decrypt(
+          { name: "AES-CTR", counter: counterBlock, length: 128 },
+          cryptoKey,
+          data.subarray(sampleStart, sampleStart + sampleSize)
+        );
+        result.set(new Uint8Array(decryptedSample), sampleStart);
+      } catch (e) {
+        console.error(`💥 seg${segmentIndex} sample[${s}] decrypt error:`, e);
+      }
+
+      mdatOffset += sampleSize;
+    }
+
+    console.log(`✅ seg${segmentIndex}: đã decrypt ${sampleCount} samples`);
+    return result.buffer;
   };
 
   const playSong = async () => {
-    setError(null);
-    setIsPlaying(false);
-    
-    try {
-      if (!globalKeyPair) throw new Error("Hệ thống ECDH chưa khởi tạo xong!");
+    if (isPipelineActiveGlobal) return;
+    if (!trackId || !targetKID) { setError("Dữ liệu bài hát chưa nạp!"); return; }
 
-      setStatusLog("📡 Đang gửi yêu cầu bắt tay lấy License...");
+    setError(null);
+    setIsLoadingStream(true);
+    isPipelineActiveGlobal = true;
+    resetStreaming();
+    isFetchingRef.current = false;
+
+    try {
+      if (!globalKeyPair) throw new Error("ECDH chưa khởi tạo!");
+      const audio = audioRef.current;
+      if (!audio) throw new Error("Thẻ Audio chưa sẵn sàng!");
+
+      // Unlock autoplay
+      try { audio.src = ""; await audio.play().catch(() => {}); audio.pause(); } catch (e) {}
+
+      setStatusLog("📡 Đang thực hiện ECDH key exchange...");
       const token = localStorage.getItem('token') || 'mock-token-uit-2026';
-      
-      const licenseRes = await fetch("http://localhost:3000/api/license", {
+
+      const licenseRes = await fetch("/api/license", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "authorization": `Bearer ${token}`,
-          "x-kid": "75635febb8a5be6b233b566534e225ad",
+          "x-kid": targetKID,
           "x-client-public-key": globalPublicKeyHex,
         },
         body: JSON.stringify({}),
       });
+      if (!licenseRes.ok) throw new Error(`License Server lỗi: ${licenseRes.status}`);
 
-      if (!licenseRes.ok) throw new Error(`Lỗi kết nối License Server: Status ${licenseRes.status}`);
-      
-      const responseBuffer = new Uint8Array(await licenseRes.arrayBuffer());
-      const payloadLen = (responseBuffer[0] << 24) | (responseBuffer[1] << 16) | (responseBuffer[2] << 8) | responseBuffer[3];
-      const payloadBytes = responseBuffer.slice(4, 4 + payloadLen);
-      const licenseData = JSON.parse(new TextDecoder().decode(payloadBytes));
+      const responseBuf = new Uint8Array(await licenseRes.arrayBuffer());
+      const payloadLen = ((responseBuf[0] << 24) | (responseBuf[1] << 16) | (responseBuf[2] << 8) | responseBuf[3]) >>> 0;
+      const licenseData = JSON.parse(new TextDecoder().decode(responseBuf.slice(4, 4 + payloadLen)));
 
-      const hexToBytes = (hex: string) => new Uint8Array(hex.match(/.{1,2}/g)?.map((b: string) => parseInt(b, 16)) || []);
+      const hexToBytes = (hex: string) => new Uint8Array(hex.match(/.{1,2}/g)!.map((b: string) => parseInt(b, 16)));
 
-      const serverPublicKey = await crypto.subtle.importKey(
-        "raw", 
-        hexToBytes(licenseData.serverPublicKeyHex || licenseData.serverPublicKey),
-        { name: "ECDH", namedCurve: "P-256" }, 
-        false, 
-        []
+      const serverPubKey = await crypto.subtle.importKey(
+        "raw", hexToBytes(licenseData.serverPublicKey),
+        { name: "ECDH", namedCurve: "P-256" }, false, []
       );
-
-      setStatusLog("🔐 Dẫn xuất Shared Secret & tính toán KDF SHA-256...");
-      const sharedSecretBits = await crypto.subtle.deriveBits(
-        { name: "ECDH", public: serverPublicKey },
-        globalKeyPair.privateKey,
-        256
-      );
-
-      const hashedSecretBits = await crypto.subtle.digest("SHA-256", sharedSecretBits);
-      const derivedKey = await crypto.subtle.importKey("raw", hashedSecretBits, { name: "AES-GCM" }, false, ["decrypt"]);
-
-      const ivBytes = hexToBytes(licenseData.ivHex || licenseData.iv);
-      const wrappedBytes = hexToBytes(licenseData.encryptedCekHex || licenseData.wrappedCek);
-
-      const cekBuffer = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: ivBytes, tagLength: 128 },
+      const sharedBits = await crypto.subtle.deriveBits({ name: "ECDH", public: serverPubKey }, globalKeyPair.privateKey, 256);
+      const hashedBits = await crypto.subtle.digest("SHA-256", sharedBits);
+      const derivedKey = await crypto.subtle.importKey("raw", hashedBits, { name: "AES-GCM" }, false, ["decrypt"]);
+      const cekBuf = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: hexToBytes(licenseData.iv), tagLength: 128 },
         derivedKey,
-        wrappedBytes
+        hexToBytes(licenseData.wrappedCek)
       );
 
-      setStatusLog("📡 Đang tải tệp âm thanh mã hóa phân đoạn CENC...");
-      const segmentUri = `http://localhost:3000/audio/segments/0ee52ddd-a7b2-474d-9044-c9a33e1397ec/segment.mp4?nocache=${Date.now()}`;
+      // extractable: false — key không thể export ra khỏi browser
+      const cryptoKey = await crypto.subtle.importKey("raw", cekBuf, { name: "AES-CTR" }, false, ["decrypt"]);
+      cryptoKeyRef.current = cryptoKey;
 
-      const encRes = await fetch(segmentUri, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: { 
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'Accept': 'video/mp4,audio/mp4,*/*' 
+      setStatusLog("🛠️ Khởi tạo MSE Pipeline...");
+      const ms = new MediaSource();
+      mediaSourceRef.current = ms;
+      audio.src = URL.createObjectURL(ms);
+      audio.volume = volume;
+
+      let isInitAppended = false;
+
+      const checkAndBufferNext = async () => {
+        if (!isPipelineActiveGlobal) return;
+        const sb = sourceBufferRef.current;
+        if (!ms || ms.readyState !== 'open') return;
+        if (!sb || sb.updating || isFetchingRef.current) {
+          setTimeout(checkAndBufferNext, 300);
+          return;
         }
-      });
-      if (!encRes.ok) throw new Error("Không thể tải tệp âm thanh phân đoạn!");
-      const encryptedAudioData = await encRes.arrayBuffer();
 
-      setStatusLog("🔐 Đang bóc tách CENC và giải mã từng sample dữ liệu...");
-      const view = new DataView(encryptedAudioData);
-      const originalView = new Uint8Array(encryptedAudioData);
-      
-      const cryptoKey = await crypto.subtle.importKey("raw", cekBuffer, { name: "AES-CTR" }, false, ["decrypt"]);
-      
-      const decryptedData = new Uint8Array(encryptedAudioData.byteLength);
-      decryptedData.set(new Uint8Array(encryptedAudioData));
-      
-      let offset = 0;
-      let activeTrunOffset = -1;
-      let activeSencOffset = -1;
-      
-      while (offset < encryptedAudioData.byteLength - 8) {
-        const size = view.getUint32(offset);
-        const type = String.fromCharCode(originalView[offset+4], originalView[offset+5], originalView[offset+6], originalView[offset+7]);
-        
-        if (type === 'moof') {
-          activeTrunOffset = -1;
-          activeSencOffset = -1;
-          
-          const findSubBoxes = (start: number, end: number) => {
-            let o = start;
-            while (o < end - 8) {
-              const s = view.getUint32(o);
-              const t = String.fromCharCode(originalView[o+4], originalView[o+5], originalView[o+6], originalView[o+7]);
-              if (t === 'traf') {
-                findSubBoxes(o + 8, o + s);
-              } else if (t === 'trun') {
-                activeTrunOffset = o;
-              } else if (t === 'senc') {
-                activeSencOffset = o;
-              }
-              o += s;
-            }
-          };
-          findSubBoxes(offset + 8, offset + size);
-          
-        } else if (type === 'mdat') {
-          if (activeTrunOffset !== -1 && activeSencOffset !== -1) {
-            const trunOffset = activeTrunOffset;
-            const sencOffset = activeSencOffset;
-            const sampleCount = view.getUint32(trunOffset + 12);
-            const flags = view.getUint32(trunOffset + 8) & 0x00FFFFFF;
-            
-            let currentIdx = trunOffset + 16;
-            if (flags & 0x000001) currentIdx += 4;
-            if (flags & 0x000004) currentIdx += 4;
-            
-            const sampleSizes = [];
-            const sampleDurationPresent = flags & 0x000100;
-            const sampleSizePresent = flags & 0x000200;
-            const sampleFlagsPresent = flags & 0x000400;
-            const sampleCompositionTimeOffsetPresent = flags & 0x000800;
-            
-            let entrySize = 0;
-            if (sampleDurationPresent) entrySize += 4;
-            if (sampleSizePresent) entrySize += 4;
-            if (sampleFlagsPresent) entrySize += 4;
-            if (sampleCompositionTimeOffsetPresent) entrySize += 4;
-            
-            for (let j = 0; j < sampleCount; j++) {
-              let sIdx = currentIdx + j * entrySize;
-              let entryOffset = sampleDurationPresent ? 4 : 0;
-              sampleSizes.push(sampleSizePresent ? view.getUint32(sIdx + entryOffset) : 0);
-            }
-            
-            let mdatDataOffset = offset + 8;
-            let writeOffset = offset + 8;
-            
-            for (let j = 0; j < sampleCount; j++) {
-              const s = sampleSizes[j];
-              const sampleIV = new Uint8Array(encryptedAudioData, sencOffset + 16 + j * 8, 8);
-              
-              const counter = new Uint8Array(16);
-              counter.set(sampleIV, 0);
-              
-              const ciphertext = encryptedAudioData.slice(mdatDataOffset, mdatDataOffset + s);
-              
-              const decryptedSample = await crypto.subtle.decrypt(
-                { name: "AES-CTR", counter: counter, length: 64 },
-                cryptoKey,
-                ciphertext
-              );
-              
-              decryptedData.set(new Uint8Array(decryptedSample), writeOffset);
-              mdatDataOffset += s;
-              writeOffset += s;
-            }
+        if (currentSegmentIndexRef.current > totalSegmentsRef.current) {
+          console.log("🎉 Stream kết thúc, đã nạp đủ tất cả mảnh.");
+          if (!sb.updating) ms.endOfStream();
+          return;
+        }
+
+        // Kiểm tra buffer window
+        let bufferedAhead = 0;
+        const ranges = sb.buffered;
+        for (let i = 0; i < ranges.length; i++) {
+          if (audio.currentTime >= ranges.start(i) && audio.currentTime <= ranges.end(i)) {
+            bufferedAhead = ranges.end(i) - audio.currentTime;
+            break;
           }
         }
-        offset += size;
-      }
-      
-      const decryptedAudioBuffer = decryptedData.buffer;
 
-      const audio = audioRef.current;
-      if (!audio) throw new Error("Thẻ Audio chưa sẵn sàng!");
+        if (bufferedAhead >= 30) {
+          // Đệm đủ 30s, chờ vơi
+          setTimeout(checkAndBufferNext, 2000);
+          return;
+        }
 
-      setStatusLog("⚡ Đang tối ưu bộ đệm luồng RAM an toàn...");
+        isFetchingRef.current = true;
+        const idx = currentSegmentIndexRef.current;
+        console.log(`📡 Buffer=${bufferedAhead.toFixed(1)}s. Kéo segment_${idx}...`);
 
-      const audioBlob = new Blob([decryptedAudioBuffer], { type: 'audio/mp4' });
-      const blobUrl = URL.createObjectURL(audioBlob);
+        try {
+          const res = await fetch(`/audio/segments/${trackIdRef.current}/segment_${idx}.m4s`);
+          if (!res.ok) {
+            if (res.status === 404 && idx >= totalSegmentsRef.current) {
+              if (ms.readyState === 'open') ms.endOfStream();
+              return;
+            }
+            throw new Error(`HTTP ${res.status}`);
+          }
 
-      audio.onplaying = () => {
-        setIsPlaying(true);
-        setStatusLog("🎉 Luồng âm thanh bảo mật đang phát trực tuyến!");
-        URL.revokeObjectURL(blobUrl);
+          const raw = await res.arrayBuffer();
+          const decrypted = await decryptSegment(raw, cryptoKey, idx);
+          currentSegmentIndexRef.current += 1;
+          sb.appendBuffer(decrypted);
+          // isFetchingRef reset sau updateend
+        } catch (err) {
+          console.error(`Lỗi kéo segment_${idx}:`, err);
+          isFetchingRef.current = false;
+          setTimeout(checkAndBufferNext, 2000);
+        }
       };
-      
-      audio.onerror = () => {
-        console.error("Audio error code:", audio.error);
-        setStatusLog("❌ Trình duyệt từ chối giải mã luồng.");
-        try { URL.revokeObjectURL(blobUrl); } catch(e){}
-      };
 
-      audio.src = blobUrl;
-      // Giữ mức volume hiện tại của người dùng chọn
-      audio.volume = volume; 
-      audio.muted = false;
+      ms.addEventListener('sourceopen', async () => {
+        try {
+          let codec = 'audio/mp4; codecs="mp4a.40.2"';
+          if (!MediaSource.isTypeSupported(codec)) codec = 'audio/mp4; codecs="mp4a.40"';
 
-      audio.play()
-        .catch(playErr => {
-          console.warn("Autoplay blocked:", playErr);
-          setStatusLog("⚠️ Hãy bấm nút ▶ trên trình phát để mồi âm thanh (Chrome Autoplay Policy).");
-        });
+          const sb = ms.addSourceBuffer(codec);
+          sourceBufferRef.current = sb;
+
+          sb.addEventListener('updateend', () => {
+            if (ms.readyState !== 'open' || sb.updating) return;
+            // ✅ Reset isFetching TRƯỚC khi gọi next
+            isFetchingRef.current = false;
+
+            if (!isInitAppended) {
+              isInitAppended = true;
+              console.log("📦 init.mp4 nạp xong. Bắt đầu kéo segment_1...");
+              checkAndBufferNext();
+            } else {
+              if (currentSegmentIndexRef.current === 2 && audio.paused) {
+                audio.play()
+                  .then(() => { setIsPlaying(true); setIsLoadingStream(false); })
+                  .catch(() => setIsLoadingStream(false));
+              }
+              checkAndBufferNext();
+            }
+          });
+
+          setStatusLog("📥 Nạp init.mp4...");
+          const initRes = await fetch(`/audio/segments/${trackIdRef.current}/init.mp4`);
+          if (!initRes.ok) throw new Error("Không tải được init.mp4!");
+          sb.appendBuffer(await initRes.arrayBuffer());
+
+        } catch (e: any) {
+          setError("MSE Error: " + e.message);
+          setIsLoadingStream(false);
+          isPipelineActiveGlobal = false;
+        }
+      });
 
     } catch (err: any) {
-      console.error("❌ Lỗi phát nhạc:", err);
       setError(err.message);
-      setStatusLog("❌ Luồng phát thất bại.");
+      setIsLoadingStream(false);
+      isPipelineActiveGlobal = false;
     }
   };
 
   const stopPlay = () => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.pause();
-      audio.src = "";
-      audio.load();
-    }
+    isPipelineActiveGlobal = false;
+    resetStreaming();
     setIsPlaying(false);
-    setCurrentTime("0:00");
-    setDuration("0:00");
-    setStatusLog("⏹ Đã dừng phát nhạc và giải phóng bộ nhớ RAM.");
+    setIsLoadingStream(false);
+    setStatusLog("⏹ Đã dừng và giải phóng bộ đệm.");
+  };
+
+  // ⚠️ DEBUG ONLY — xóa trước production vì Blob tĩnh không có DRM
+  const testBlobPlayback = async () => {
+    if (!cryptoKeyRef.current) { setError("Chưa có key — bấm Stream trước"); return; }
+    try {
+      setStatusLog("🧪 Ghép Blob test...");
+      const initRes = await fetch(`/audio/segments/${trackId}/init.mp4`);
+      const initBuf = await initRes.arrayBuffer();
+
+      const blobs: ArrayBuffer[] = [];
+      for (let i = 1; i <= 3; i++) {
+        const r = await fetch(`/audio/segments/${trackId}/segment_${i}.m4s`);
+        if (!r.ok) continue;
+        const raw = await r.arrayBuffer();
+        blobs.push(await decryptSegment(raw, cryptoKeyRef.current!, i));
+        console.log(`✅ segment_${i} decrypted`);
+      }
+
+      const blob = new Blob([initBuf, ...blobs], { type: 'audio/mp4' });
+      if (audioRef.current) {
+        audioRef.current.src = URL.createObjectURL(blob);
+        audioRef.current.load();
+        await audioRef.current.play();
+        setIsPlaying(true);
+        setStatusLog(`🎵 Blob test: ${blobs.length} segments`);
+      }
+    } catch (err: any) {
+      setError("Blob test lỗi: " + err.message);
+    }
   };
 
   return (
     <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative select-none">
-      
-      <button onClick={() => router.push('/')} className="absolute top-6 left-6 flex items-center gap-2 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 hover:text-white transition-all duration-200 shadow-md">
-        ✕ Quay lại
-      </button>
+      <button onClick={() => router.push('/')} className="absolute top-6 left-6 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 transition-all shadow-md">✕ Quay lại</button>
+      <h1 className="text-3xl font-bold text-white mb-2">Secure Audio DASH-MSE Player</h1>
+      <p className="text-gray-400 mb-10 text-sm">Đồ án Tốt Nghiệp / Mật Mã học NT219 - UIT</p>
 
-      <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">Secure Audio Stream Player</h1>
-      <p className="text-gray-400 mb-10 text-sm font-medium">Mật Mã học NT219 - UIT</p>
-      
-      <div className="w-full max-w-md bg-gray-900 rounded-2xl shadow-2xl border border-gray-800 p-6 flex flex-col gap-5 transition-all duration-300">
+      <div className="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-800 p-6 flex flex-col gap-5">
         <div className="flex items-center gap-4">
-          <div className={`w-16 h-16 ${isPlaying ? 'bg-blue-600 animate-pulse border-blue-500' : 'bg-gray-800 border-gray-700'} rounded-xl flex items-center justify-center shadow-lg border-2 transition-all duration-300`}>
-            <span className="text-white text-3xl font-mono">♪</span>
+          <div className={`w-16 h-16 ${isPlaying ? 'bg-emerald-600 animate-pulse border-emerald-500' : 'bg-gray-800'} rounded-xl flex items-center justify-center border-2 shadow-lg`}>
+            <span className="text-white text-3xl">📡</span>
           </div>
-          
-          <div className="flex-1 min-w-0">
-            <p className="text-white font-bold text-base tracking-wide truncate">Encrypted Segment Audio Stream</p>
-            <p className="text-gray-500 text-[11px] mt-0.5 font-mono truncate">DRM: In-Memory ECDH + AES-CTR</p>
+          <div>
+            <p className="text-white font-bold text-base truncate max-w-[240px]">{songTitle}</p>
+            <p className="text-emerald-400 text-[11px] font-mono animate-pulse">● CENC Per-Sample AES-CTR</p>
           </div>
         </div>
 
-        {/* Thẻ audio ẩn hoàn toàn */}
-        <audio ref={audioRef} className="hidden" controlsList="nodownload"></audio>
+        <audio ref={audioRef} className="hidden" />
 
-        {/* BLOCK 1: Khung hiển thị thời gian số */}
-        <div className="flex items-center justify-between px-3 py-2 bg-gray-950/60 border border-gray-800/60 rounded-xl font-mono text-xs text-gray-400">
-          <span>Thời gian:</span>
-          <span className="text-blue-400 font-semibold">{currentTime} <span className="text-gray-600">/</span> {duration}</span>
+        <div className="flex items-center justify-between px-3 py-2 bg-gray-950/60 border border-gray-800 rounded-xl font-mono text-xs text-gray-400">
+          <span>Thời gian thực:</span>
+          <span className="text-emerald-400 font-semibold">{currentTime} / {duration}</span>
         </div>
 
-        {/* BLOCK 2: Khung điều chỉnh âm lượng (Loa to nhỏ) tự Custom */}
-        <div className="flex items-center gap-3 px-3 py-2.5 bg-gray-950/60 border border-gray-800/60 rounded-xl">
-          <button 
-            onClick={toggleMute} 
-            className="text-base hover:scale-110 active:scale-95 transition-transform duration-100"
-            title="Bấm để Tắt/Bật tiếng nhanh"
-          >
-            {getVolumeIcon()}
-          </button>
-          
-          <input 
-            type="range" 
-            min="0" 
-            max="1" 
-            step="0.05" 
-            value={volume} 
-            onChange={handleVolumeChange} 
-            className="flex-1 accent-blue-500 h-1.5 bg-gray-800 rounded-lg appearance-none cursor-pointer" 
-          />
-          
-          <span className="font-mono text-[10px] text-gray-500 w-8 text-right">
-            {Math.round(volume * 100)}%
-          </span>
+        <div className="flex items-center gap-3 px-3 py-2.5 bg-gray-950/60 border border-gray-800 rounded-xl">
+          <span className="text-gray-500 text-xs">🔊</span>
+          <input type="range" min="0" max="1" step="0.05" value={volume} onChange={handleVolumeChange}
+            className="flex-1 accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer" />
         </div>
 
-        {/* BLOCK 3: Cụm nút điều khiển chính */}
         <div className="flex gap-3 mt-1">
-          <button onClick={playSong} disabled={isPlaying} className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-semibold text-sm disabled:opacity-40 disabled:pointer-events-none transition-all shadow-md flex items-center justify-center gap-2">
-            ▶ Giải mã & Phát
+          <button onClick={playSong} disabled={isPlaying || isLoadingStream}
+            className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm disabled:opacity-40 transition-all shadow-md">
+            {isLoadingStream ? "⏳ Đang kết nối..." : "📡 Bắt đầu Stream"}
           </button>
-          <button onClick={stopPlay} disabled={!isPlaying} className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 disabled:pointer-events-none transition-all border border-gray-700 shadow-md flex items-center justify-center gap-2">
+          <button onClick={stopPlay} disabled={!isPlaying && !isLoadingStream}
+            className="bg-gray-800 text-gray-300 px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 transition-all border border-gray-700 shadow-md">
             ⏹ Dừng
           </button>
+          <button onClick={testBlobPlayback}
+            className="bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-3 rounded-xl font-semibold text-sm transition-all shadow-md">
+            🧪 Test
+          </button>
         </div>
       </div>
-      
-      <div className="mt-5 w-full max-w-md p-3 bg-gray-900/60 border border-gray-800/80 rounded-xl shadow-inner flex items-center justify-between">
-        <span className="text-[11px] text-gray-400 font-medium">Hệ thống:</span>
+
+      <div className="mt-5 w-full max-w-md p-3 bg-gray-900/60 border border-gray-800 rounded-xl flex items-center justify-between">
+        <span className="text-[11px] text-gray-400">Pipeline:</span>
         <span className="text-[11px] font-mono font-semibold text-emerald-400 truncate max-w-[250px]">{statusLog}</span>
       </div>
-
-      {error && <div className="mt-4 w-full max-w-md p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-xl shadow-inner text-xs font-mono">Lỗi thực thi: {error}</div>}
-      
-      <div className="mt-6 w-full max-w-md p-4 bg-gray-950 rounded-xl border border-gray-900/40 text-center">
-        <p className="text-[11px] text-gray-600 leading-relaxed">
-          Cơ chế bảo mật: Dữ liệu âm thanh thô chỉ tồn tại dưới dạng phân mảnh nhị phân tạm thời trên RAM. 
-          Bằng cách thu hồi Object URL ngay khi vừa phát, hệ thống bẻ gãy hoàn toàn khả năng sao chép.
-        </p>
-      </div>
+      {error && (
+        <div className="mt-4 w-full max-w-md p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-xl font-mono text-xs">
+          Lỗi: {error}
+        </div>
+      )}
     </div>
   );
 }
