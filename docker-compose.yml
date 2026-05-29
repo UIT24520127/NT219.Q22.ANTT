@@ -139,6 +139,51 @@ services:
       timeout: 10s
       retries: 3
 
+  # 7. Prometheus - Metrics collection and monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: drm_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=7d'
+    depends_on:
+      - app
+    networks:
+      - private-subnet
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 8. Grafana - Visualization dashboard (Optional, for better metrics viewing)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: drm_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - private-subnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 networks:
   public-subnet:
     driver: bridge
@@ -147,6 +192,10 @@ networks:
   db-subnet:
     driver: bridge
     internal: true
+
+volumes:
+  prometheus_data:
+  grafana_data:
 
 # ============================================================================
 # SETUP INSTRUCTIONS:

@@ -3,6 +3,11 @@ import { kmsService } from '@/lib/kms/bao';
 import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
 import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import crypto from 'crypto'
+import { 
+  licenseIssued, 
+  licenseFailed, 
+  licenseProcessingDuration 
+} from '@/lib/metrics';
 
 /**
  * Extract KID from Widevine Challenge
@@ -14,11 +19,11 @@ const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
     // Search for PSSH box signature (4-byte box type 'pssh')
     const psshSignature = Buffer.from('pssh');
     let offset = 0;
-    
+
     while (offset < challengeBuffer.length - 8) {
       offset = challengeBuffer.indexOf(psshSignature, offset);
       if (offset === -1) break;
-      
+
       // Validate box header: size field should be at offset-4
       if (offset >= 4) {
         const boxSize = challengeBuffer.readUInt32BE(offset - 4);
@@ -43,12 +48,16 @@ const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
 };
 
 export async function POST(request: Request) {
+  const startTime = Date.now();
+  const timer = licenseProcessingDuration.startTimer();
+  
   try {
     // 1. Receive Widevine Challenge (binary data from Shaka Player)
     const challengeArrayBuffer = await request.arrayBuffer();
     const challengeBuffer = Buffer.from(challengeArrayBuffer);
 
     if (challengeBuffer.length === 0) {
+      licenseFailed.inc({ reason: 'empty_challenge', error_type: 'validation' });
       return NextResponse.json({ error: 'Empty Widevine Challenge' }, { status: 400 });
     }
 
@@ -56,7 +65,7 @@ export async function POST(request: Request) {
 
     // 2. Extract KID from challenge or use headers as fallback
     let kid: string | null = extractKIDFromChallenge(challengeBuffer);
-    
+
     // Fallback: Try KID from custom header
     if (!kid) {
       kid = request.headers.get('x-kid');
@@ -68,6 +77,7 @@ export async function POST(request: Request) {
     // Error if no KID found
     if (!kid) {
       console.error('❌ [License] No KID provided in challenge or headers');
+      licenseFailed.inc({ reason: 'missing_kid', error_type: 'validation' });
       return NextResponse.json({ error: 'No KID provided in challenge or headers' }, { status: 400 });
     }
 
@@ -77,6 +87,7 @@ export async function POST(request: Request) {
     const clientPublicKeyHex = request.headers.get('x-client-public-key');
     if (!clientPublicKeyHex) {
       console.error('❌ [License - Người A] Giao dịch thất bại: Thiếu x-client-public-key header để thiết lập ECDH');
+      licenseFailed.inc({ reason: 'missing_client_key', error_type: 'ecdh_handshake' });
       return NextResponse.json({ error: 'ECDH Handshake Required: Missing client public key' }, { status: 400 });
     }
 
@@ -87,6 +98,7 @@ export async function POST(request: Request) {
     if (!encryptedCek) {
       console.error(`❌ [License] CEK not found for KID: ${kid}`);
       await logAuditEvent('LICENSE_FAILED', undefined, kid, 'SYSTEM', 'CEK not found');
+      licenseFailed.inc({ reason: 'cek_not_found', error_type: 'database' });
       return NextResponse.json({ error: 'Content not available' }, { status: 404 });
     }
 
@@ -97,12 +109,13 @@ export async function POST(request: Request) {
     // Validate CEK format (should be 64 hex characters for 256-bit key)
     if (plaintextCek.length !== 64 || !/^[0-9a-f]+$/i.test(plaintextCek)) {
       console.error('❌ [License] Invalid CEK format after decryption');
+      licenseFailed.inc({ reason: 'invalid_cek_format', error_type: 'validation' });
       throw new Error('Invalid CEK format');
     }
 
     console.log(`✅ [License] CEK decrypted successfully for KID: ${kid}`);
 
-// =========================================================================
+    // =========================================================================
     // 🔥 [MÃ NGUỒN NGƯỜI A - TUẦN 3]: GỌI TỪ FILE ECDH.TS SANG ĐỂ WRAPPING KHÓA
     // =========================================================================
     console.log('🛡️ [License - Người A] Đang gọi module mật mã từ file ecdh.ts...');
@@ -143,8 +156,8 @@ export async function POST(request: Request) {
 
     // 5. Đóng gói cấu trúc mảng nhị phân đồng nhất (4 bytes độ dài + Payload + Chữ ký)
     const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
-    finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0); 
-    licensePayloadBuffer.copy(finalLicenseBuffer, 4); 
+    finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0);
+    licensePayloadBuffer.copy(finalLicenseBuffer, 4);
     signatureBuffer.copy(finalLicenseBuffer, 4 + licensePayloadBuffer.length);
 
     console.log(`📦 [LicenseProxy - Người A] Hoàn tất bọc ECDH + Chữ ký RSA thành công! Size: ${finalLicenseBuffer.length} bytes`);
@@ -152,7 +165,11 @@ export async function POST(request: Request) {
     // 6. Ghi nhận lịch sử hệ thống (Giữ nguyên của bạn B)
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
 
-    // 7. Trả dữ liệu mã hóa nhị phân về cho Shaka Player
+    // 7. Track successful license issuance
+    licenseIssued.inc({ kid });
+    timer({ kid });
+
+    // 8. Trả dữ liệu mã hóa nhị phân về cho Shaka Player
     return new NextResponse(finalLicenseBuffer, {
       headers: {
         'Content-Type': 'application/octet-stream',
@@ -165,7 +182,12 @@ export async function POST(request: Request) {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error('❌ [License] Error in license proxy:', message);
-    return NextResponse.json({ 
+    
+    // Track generic license errors
+    licenseFailed.inc({ reason: 'processing_error', error_type: 'internal' });
+    timer();
+    
+    return NextResponse.json({
       error: 'License generation failed',
       details: process.env.NODE_ENV === 'development' ? message : undefined
     }, { status: 500 });
