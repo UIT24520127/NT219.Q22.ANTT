@@ -343,6 +343,49 @@ export default function CustomPlayerPage() {
       audio.volume = volume;
 
       let isInitAppended = false;
+      // Số segment đã nạp xong vào SourceBuffer (dùng để evict buffer cũ)
+      let lastEvictedEnd = 0;
+
+      // ── Hằng số điều phối buffer window ──────────────────────────────────
+      const BUFFER_AHEAD_TARGET = 30;  // giây — mục tiêu buffer phía trước
+      const BUFFER_AHEAD_MAX   = 45;  // giây — dừng fetch nếu vượt ngưỡng này
+      const BUFFER_BEHIND_KEEP =  5;  // giây — giữ lại bao nhiêu giây đã phát (để seek back)
+      // ─────────────────────────────────────────────────────────────────────
+
+      // Tính buffered ahead chính xác, kể cả khi audio chưa phát (currentTime=0)
+      const getBufferedAhead = (): number => {
+        const sb = sourceBufferRef.current;
+        if (!sb) return 0;
+        const ranges = sb.buffered;
+        const ct = audio.currentTime;
+        let maxEnd = 0;
+        for (let i = 0; i < ranges.length; i++) {
+          // Lấy end của range nào chứa currentTime, hoặc range liền sau
+          if (ranges.end(i) > ct && ranges.start(i) <= ct + 0.5) {
+            return ranges.end(i) - ct;
+          }
+          // Trường hợp audio chưa phát (ct=0): lấy end của range đầu tiên
+          if (ct === 0 && ranges.start(i) === 0) {
+            return ranges.end(i);
+          }
+        }
+        return 0;
+      };
+
+      // Evict phần buffer đã phát qua (giải phóng RAM)
+      const evictOldBuffer = () => {
+        const sb = sourceBufferRef.current;
+        if (!sb || sb.updating || ms.readyState !== 'open') return;
+        const ct = audio.currentTime;
+        const evictTo = Math.max(0, ct - BUFFER_BEHIND_KEEP);
+        if (evictTo > lastEvictedEnd + 1) {
+          try {
+            sb.remove(0, evictTo);
+            lastEvictedEnd = evictTo;
+            console.log(`🗑️ Evict buffer 0–${evictTo.toFixed(1)}s`);
+          } catch (e) { /* ignore */ }
+        }
+      };
 
       const checkAndBufferNext = async () => {
         if (!isPipelineActiveGlobal) return;
@@ -353,37 +396,36 @@ export default function CustomPlayerPage() {
           return;
         }
 
+        // Evict buffer cũ trước khi quyết định fetch mới
+        evictOldBuffer();
+        if (sb.updating) return; // evict đang chạy, chờ updateend gọi lại
+
+        // Đã nạp hết tất cả segment
         if (currentSegmentIndexRef.current > totalSegmentsRef.current) {
-          console.log("🎉 Stream kết thúc, đã nạp đủ tất cả mảnh.");
+          console.log("🎉 Đã nạp đủ toàn bộ. Kết thúc stream.");
           if (!sb.updating) ms.endOfStream();
           return;
         }
 
-        // Kiểm tra buffer window
-        let bufferedAhead = 0;
-        const ranges = sb.buffered;
-        for (let i = 0; i < ranges.length; i++) {
-          if (audio.currentTime >= ranges.start(i) && audio.currentTime <= ranges.end(i)) {
-            bufferedAhead = ranges.end(i) - audio.currentTime;
-            break;
-          }
-        }
+        const bufferedAhead = getBufferedAhead();
 
-        if (bufferedAhead >= 30) {
-          // Đệm đủ 30s, chờ vơi
-          setTimeout(checkAndBufferNext, 2000);
+        if (bufferedAhead >= BUFFER_AHEAD_MAX) {
+          // Đệm quá đầy — polling lại sau khi nhạc phát vơi
+          setTimeout(checkAndBufferNext, 3000);
           return;
         }
 
+        // Quyết định fetch
         isFetchingRef.current = true;
         const idx = currentSegmentIndexRef.current;
-        console.log(`📡 Buffer=${bufferedAhead.toFixed(1)}s. Kéo segment_${idx}...`);
+        console.log(`📡 ahead=${bufferedAhead.toFixed(1)}s → fetch segment_${idx}`);
 
         try {
           const res = await fetch(`/audio/segments/${trackIdRef.current}/segment_${idx}.m4s`);
           if (!res.ok) {
             if (res.status === 404 && idx >= totalSegmentsRef.current) {
               if (ms.readyState === 'open') ms.endOfStream();
+              isFetchingRef.current = false;
               return;
             }
             throw new Error(`HTTP ${res.status}`);
@@ -392,10 +434,10 @@ export default function CustomPlayerPage() {
           const raw = await res.arrayBuffer();
           const decrypted = await decryptSegment(raw, cryptoKey, idx);
           currentSegmentIndexRef.current += 1;
+          // appendBuffer xong → updateend sẽ reset isFetchingRef và gọi lại
           sb.appendBuffer(decrypted);
-          // isFetchingRef reset sau updateend
         } catch (err) {
-          console.error(`Lỗi kéo segment_${idx}:`, err);
+          console.error(`Lỗi fetch segment_${idx}:`, err);
           isFetchingRef.current = false;
           setTimeout(checkAndBufferNext, 2000);
         }
@@ -407,24 +449,32 @@ export default function CustomPlayerPage() {
           if (!MediaSource.isTypeSupported(codec)) codec = 'audio/mp4; codecs="mp4a.40"';
 
           const sb = ms.addSourceBuffer(codec);
+          // mode = 'segments' là mặc định, đảm bảo decode đúng thứ tự
           sourceBufferRef.current = sb;
 
           sb.addEventListener('updateend', () => {
             if (ms.readyState !== 'open' || sb.updating) return;
-            // ✅ Reset isFetching TRƯỚC khi gọi next
             isFetchingRef.current = false;
 
             if (!isInitAppended) {
               isInitAppended = true;
-              console.log("📦 init.mp4 nạp xong. Bắt đầu kéo segment_1...");
+              console.log("📦 init.mp4 xong. Kéo segment_1...");
               checkAndBufferNext();
             } else {
+              // Bắt đầu phát ngay khi có đủ dữ liệu đầu tiên (segment 1 xong)
               if (currentSegmentIndexRef.current === 2 && audio.paused) {
                 audio.play()
                   .then(() => { setIsPlaying(true); setIsLoadingStream(false); })
                   .catch(() => setIsLoadingStream(false));
               }
-              checkAndBufferNext();
+              // Chỉ fetch tiếp nếu buffer chưa đủ — không fetch vô điều kiện
+              const ahead = getBufferedAhead();
+              if (ahead < BUFFER_AHEAD_TARGET) {
+                checkAndBufferNext();
+              } else {
+                // Đặt timer polling thay vì fetch ngay
+                setTimeout(checkAndBufferNext, 2000);
+              }
             }
           });
 
@@ -489,7 +539,7 @@ export default function CustomPlayerPage() {
     <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative select-none">
       <button onClick={() => router.push('/')} className="absolute top-6 left-6 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 transition-all shadow-md">✕ Quay lại</button>
       <h1 className="text-3xl font-bold text-white mb-2">Secure Audio DASH-MSE Player</h1>
-      <p className="text-gray-400 mb-10 text-sm">Đồ án Tốt Nghiệp / Mật Mã học NT219 - UIT</p>
+      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT</p>
 
       <div className="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-800 p-6 flex flex-col gap-5">
         <div className="flex items-center gap-4">
