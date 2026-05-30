@@ -1,113 +1,64 @@
 # ============================================================================
-# DOCKERFILE - Next.js Application with Secure Audio Delivery
-# ============================================================================
-# Multi-stage build optimized for production
-# - Stage 1: Build dependencies and application
-# - Stage 2: Runtime environment with minimal footprint
-# ============================================================================
-
-# ============================================================================
-# Stage 1: Builder
+# Stage 1: Builder — node:24-alpine (build time)
 # ============================================================================
 FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    ffmpeg
+RUN apk add --no-cache python3 make g++ ffmpeg
 
-# Copy package files
 COPY package*.json ./
+RUN npm install --prefer-offline --no-audit
 
-# Install dependencies (production + dev for build time)
-RUN npm ci --prefer-offline --no-audit
-
-# Copy source code
 COPY . .
-
-# Build Next.js application
 RUN npm run build
 
 # ============================================================================
-# Stage 2: Runtime
+# Stage 2: Runtime — PHẢI cùng major version với builder (node:24-alpine)
+# ⚠️  Bản gốc dùng node:20 ở runtime nhưng build bằng node:24
+#     → native modules (.node files) bị ABI mismatch → crash khi start
 # ============================================================================
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
-# ----------------------------------------------------------------------------
-# 🔥 VÁ LỖI CỐT LÕI: Cài các công cụ chạy nền bao gồm cả Shaka Packager
-# ----------------------------------------------------------------------------
 RUN apk add --no-cache \
     ffmpeg \
     curl \
     libc6-compat && \
-    curl -L https://github.com/shaka-project/shaka-packager/releases/download/v3.2.0/packager-linux-x64 -o /usr/local/bin/packager && \
+    # Shaka Packager — dùng đúng binary cho linux-x64 musl (Alpine)
+    curl -fL https://github.com/shaka-project/shaka-packager/releases/download/v3.2.0/packager-linux-x64 \
+      -o /usr/local/bin/packager && \
     chmod +x /usr/local/bin/packager
 
-# Copy package files from builder
 COPY package*.json ./
 
-# Install production dependencies only
-RUN npm ci --only=production --prefer-offline --no-audit && \
+# ⚠️  --only=production bị deprecated từ npm v9+, dùng --omit=dev
+RUN npm ci --omit=dev --prefer-offline --no-audit && \
     npm cache clean --force
 
-# Copy built application from builder
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 
-# Copy SSL certificates directory (will be mounted as volume)
-RUN mkdir -p /app/certs
+# Thư mục audio segments phải tồn tại trước khi chown
+RUN mkdir -p /app/certs /audio/segments
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nextjs -u 1001
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
 
-# Set ownership
-RUN chown -R nextjs:nodejs /app
+# nextjs user cần write vào /audio (ingest tạo segment files)
+RUN chown -R nextjs:nodejs /app /audio
 
 USER nextjs
 
-# ============================================================================
-# Health Check
-# ============================================================================
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:3000/api/health || exit 1
 
-# ============================================================================
-# Expose Port
-# ============================================================================
 EXPOSE 3000
 
-# ============================================================================
-# Environment Variables (with defaults)
-# ============================================================================
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# ============================================================================
-# Start Application
-# ============================================================================
-CMD ["npm", "run", "dev"]
-
-# ============================================================================
-# Docker Build & Run Instructions:
-# ============================================================================
-# Build:
-#   docker build -t drm-app:latest .
-#
-# Run (Development):
-#   docker run -it \
-#     -p 3000:3000 \
-#     -e DATABASE_URL="..." \
-#     -e R2_ACCOUNT_ID="..." \
-#     -v $(pwd)/certs:/app/certs:ro \
-#     drm-app:latest
-#
-# Run (Production via docker-compose):
-#   docker-compose -f docker-compose-secure.yml up -d
-# ============================================================================
+# Production image nên dùng `npm start` (next start), không phải `npm run dev`
+# docker-compose override sang `npm run dev` khi dev — OK
+CMD ["npm", "start"]

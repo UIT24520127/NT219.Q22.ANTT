@@ -1,96 +1,67 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { createTrack, getTrackById, getActiveManifest, updateTrackDuration, saveDASHManifest, deactivateOldManifests, logAuditEvent } from '@/lib/track-db';
-import { unlinkSync } from 'fs';
+import {
+  createTrack,
+  getTrackById,
+  getAllTracks,
+  getActiveManifest,
+  updateTrackDuration,
+  saveDASHManifest,
+  deactivateOldManifests,
+  logAuditEvent,
+} from '@/lib/track-db';
 import { encryptAndPackageMedia } from '@/lib/packager/packager';
 
-// Temporary upload directory (cleaned after packaging)
 const TEMP_UPLOAD_DIR = process.env.TEMP_UPLOAD_DIR || '/tmp/audio-uploads';
 
-/**
- * Ensure upload directory exists
- */
 const ensureUploadDir = () => {
-  if (!existsSync(TEMP_UPLOAD_DIR)) {
-    mkdirSync(TEMP_UPLOAD_DIR, { recursive: true });
-  }
+  if (!existsSync(TEMP_UPLOAD_DIR)) mkdirSync(TEMP_UPLOAD_DIR, { recursive: true });
 };
 
-/**
- * Validate audio file format
- * @param filename Name of the file
- * @param buffer File content buffer
- */
 const validateAudioFile = (filename: string, buffer: Buffer): boolean => {
   const ext = path.extname(filename).toLowerCase();
-  
-  // Check extension
   if (!['.m4a', '.aac', '.mp4'].includes(ext)) {
     console.warn(`⚠️  [Ingest] Invalid extension: ${ext}`);
     return false;
   }
-
-  // Check magic bytes for AAC/M4A
-  // M4A/MP4 has 'ftyp' at bytes 4-7
-  // AAC starts with 0xFFE or 0xFFF (syncword)
   const magicBytes = buffer.slice(0, 12).toString('hex');
-  const hasM4ASignature = magicBytes.includes('66747970'); // 'ftyp' in hex ('66747970')
+  const hasM4ASignature = magicBytes.includes('66747970');
   const hasAACSignature = (buffer[0] & 0xFF) === 0xFF && ((buffer[1] & 0xE0) === 0xE0);
-
   if (!hasM4ASignature && !hasAACSignature) {
     console.warn('⚠️  [Ingest] File does not appear to be valid AAC/M4A');
     return false;
   }
-
   console.log(`✅ [Ingest] File validated: ${filename}`);
   return true;
 };
 
-/**
- * Parse FormData to extract file
- * @param request Next.js request object
- */
 const extractAudioFile = async (request: NextRequest): Promise<{ filename: string; buffer: Buffer } | null> => {
   try {
     const contentType = request.headers.get('content-type');
-    
     if (contentType?.includes('multipart/form-data')) {
       const formData = await request.formData();
       const file = formData.get('audio') as File;
-      
-      if (!file) {
-        console.error('❌ [Ingest] No audio file provided in form data');
-        return null;
-      }
-
-      const buffer = Buffer.from(await file.arrayBuffer());
-      return {
-        filename: file.name,
-        buffer
-      };
+      if (!file) { console.error('❌ [Ingest] No audio file in form data'); return null; }
+      return { filename: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
     } else if (contentType?.includes('application/octet-stream')) {
-      // Raw file upload
       const buffer = Buffer.from(await request.arrayBuffer());
       const filename = request.headers.get('x-filename') || `audio-${uuidv4()}.m4a`;
-      return {
-        filename,
-        buffer
-      };
+      return { filename, buffer };
     }
-
     console.error('❌ [Ingest] Unsupported content type');
     return null;
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-
-    console.error('❌ [Ingest] Error parsing request:', message);
+    console.error('❌ [Ingest] Error parsing request:', error instanceof Error ? error.message : error);
     return null;
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST: Upload và đóng gói bài hát mới (giữ nguyên)
+// ─────────────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
   let trackId: string | null = null;
@@ -99,181 +70,114 @@ export async function POST(request: NextRequest) {
     console.log('📥 [Ingest] Processing audio upload...');
     ensureUploadDir();
 
-    // Step 1: Extract and validate audio file
     const audioFile = await extractAudioFile(request);
-    if (!audioFile) {
-      return NextResponse.json(
-        { error: 'No valid audio file provided' },
-        { status: 400 }
-      );
-    }
+    if (!audioFile) return NextResponse.json({ error: 'No valid audio file provided' }, { status: 400 });
+    if (!validateAudioFile(audioFile.filename, audioFile.buffer))
+      return NextResponse.json({ error: 'Invalid audio format. Use AAC or M4A.' }, { status: 400 });
 
-    if (!validateAudioFile(audioFile.filename, audioFile.buffer)) {
-      return NextResponse.json(
-        { error: 'Invalid audio file format. Please upload AAC or M4A.' },
-        { status: 400 }
-      );
-    }
-
-    // Step 2: Save to temporary location
     tempFilePath = path.join(TEMP_UPLOAD_DIR, `${uuidv4()}${path.extname(audioFile.filename)}`);
     writeFileSync(tempFilePath, audioFile.buffer);
-    console.log(`💾 [Ingest] Temporary file saved: ${tempFilePath}`);
 
-    // Step 3: Create track record in database with encrypted CEK
     const sourceFormat = path.extname(audioFile.filename).slice(1).toUpperCase();
-    console.log(`📝 [Ingest] Creating track record for ${audioFile.filename}...`);
-    
     const trackData = await createTrack(audioFile.filename, sourceFormat);
     trackId = trackData.trackId;
-    const kid = trackData.kid;
-    const encrypted_cek = trackData.encrypted_cek;
+    const { kid, encrypted_cek } = trackData;
 
-    console.log(`✅ [Ingest] Track created: ${trackId}`);
-    console.log(`🔑 [Ingest] Generated KID: ${kid}`);
-
-    // Step 4: Call Shaka Packager to encrypt and generate DASH package
-    console.log('🚀 [Ingest] Starting DASH packaging...');
-    
     let packagingResult;
     try {
-      packagingResult = await encryptAndPackageMedia(
-        tempFilePath,
-        trackId,
-        kid,
-        encrypted_cek
-      );
+      packagingResult = await encryptAndPackageMedia(tempFilePath, trackId, kid, encrypted_cek);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('❌ [Ingest] Packaging failed:', message);
       await logAuditEvent('PACKAGE_FAILED', trackId, kid, 'SYSTEM', audioFile.filename);
       throw new Error(`Packaging failed: ${message}`);
     }
 
-    // Step 5: Validate packaging result
-    if (!packagingResult || !packagingResult.mpdPath || !packagingResult.segmentDir) {
-      throw new Error('Invalid packaging result: missing required properties');
-    }
+    if (!packagingResult?.mpdPath || !packagingResult?.segmentDir)
+      throw new Error('Invalid packaging result');
 
-    // Step 6: Update track with duration from packaging result
-    if (packagingResult.duration) {
-      await updateTrackDuration(trackId, packagingResult.duration);
-    }
-
-    // Step 7: Deactivate old manifests and save new one
+    if (packagingResult.duration) await updateTrackDuration(trackId, packagingResult.duration);
     await deactivateOldManifests(trackId);
     await saveDASHManifest(trackId, packagingResult.mpdPath);
 
-    // Step 8: Log success (error handled gracefully)
-    try {
-      await logAuditEvent('PACKAGE_CREATED', trackId, kid, 'SYSTEM', audioFile.filename);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.warn('⚠️  [Ingest] Audit logging failed:', message);
-      // Don't fail the upload due to logging issues
-    }
+    try { await logAuditEvent('PACKAGE_CREATED', trackId, kid, 'SYSTEM', audioFile.filename); }
+    catch { /* non-critical */ }
 
-    // Step 9: Cleanup temporary file
-    try {
-      unlinkSync(tempFilePath);
-      console.log(`🧹 [Ingest] Temporary file cleaned up`);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.warn(`⚠️  [Ingest] Could not delete temporary file: ${message}`);
-    }
+    try { unlinkSync(tempFilePath); } catch { }
 
-    // Step 10: Return success response
-    console.log(`✨ [Ingest] Upload and packaging complete for track ${trackId}`);
-    
     return NextResponse.json({
       success: true,
       message: 'Audio processed successfully',
       data: {
-        trackId,
-        kid,
+        trackId, kid,
         filename: audioFile.filename,
         duration: packagingResult.duration,
         mpdPath: packagingResult.mpdPath,
         segmentDir: packagingResult.segmentDir,
         bitrate: packagingResult.bitrate,
-        createdAt: new Date().toISOString()
-      }
+        createdAt: new Date().toISOString(),
+      },
     }, { status: 201 });
 
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error";
+    const message = error instanceof Error ? error.message : 'Unknown error';
     console.error('❌ [Ingest] Error during upload:', message);
-
-    // Log failure
-    if (trackId) {
-      await logAuditEvent('INGEST_FAILED', trackId, undefined, 'SYSTEM', message);
-    }
-
-    // Cleanup temporary file if it exists
-    if (tempFilePath) {
-      try {
-        unlinkSync(tempFilePath);
-      } catch (_) {}
-    }
-
+    if (trackId) await logAuditEvent('INGEST_FAILED', trackId, undefined, 'SYSTEM', message);
+    if (tempFilePath) try { unlinkSync(tempFilePath); } catch { }
     return NextResponse.json(
-      {
-        error: 'Upload processing failed',
-        details: process.env.NODE_ENV === 'development' ? message : undefined
-      },
+      { error: 'Upload processing failed', details: process.env.NODE_ENV === 'development' ? message : undefined },
       { status: 500 }
     );
   }
 }
 
-/**
- * GET endpoint to check upload status and retrieve track info
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// GET: Hai chế độ
+//   ?trackId=xxx  → trả về 1 track cụ thể (player/page.tsx dùng)
+//   (không tham số) → trả về toàn bộ tracks (homepage dùng)
+// ─────────────────────────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
   try {
     const trackId = request.nextUrl.searchParams.get('trackId');
 
-    if (!trackId) {
-      return NextResponse.json(
-        { error: 'trackId parameter required' },
-        { status: 400 }
-      );
+    // ── Chế độ 1: Lấy 1 track theo ID ────────────────────────────────────
+    if (trackId) {
+      const track = await getTrackById(trackId);
+      if (!track) return NextResponse.json({ error: 'Track not found' }, { status: 404 });
+
+      const manifest = await getActiveManifest(trackId);
+      return NextResponse.json({
+        success: true,
+        data: {
+          track: {
+            id: track.id,
+            filename: track.filename,
+            duration: track.duration ?? 0,
+            kid: track.kid,
+            sourceFormat: track.source_format,
+            createdAt: track.created_at,
+          },
+          manifest: manifest ? { mpdPath: manifest.mpd_path, createdAt: manifest.created_at } : null,
+        },
+      });
     }
 
-    const track = await getTrackById(trackId);
-    if (!track) {
-      return NextResponse.json(
-        { error: 'Track not found' },
-        { status: 404 }
-      );
-    }
-
-    const manifest = await getActiveManifest(trackId);
-
+    // ── Chế độ 2: Lấy toàn bộ tracks (homepage) ──────────────────────────
+    const tracks = await getAllTracks();
     return NextResponse.json({
       success: true,
-      data: {
-        track: {
-          id: track.id,
-          filename: track.filename,
-          duration: track.duration,
-          kid: track.kid,
-          sourceFormat: track.source_format,
-          createdAt: track.created_at
-        },
-        manifest: manifest ? {
-          mpdPath: manifest.mpd_path,
-          createdAt: manifest.created_at
-        } : null
-      }
+      data: tracks.map(t => ({
+        id: t.id,
+        filename: t.filename,
+        duration: t.duration ?? 0,
+        kid: t.kid,
+        sourceFormat: t.source_format,
+        createdAt: t.created_at,
+      })),
     });
 
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error('❌ [Ingest] Error retrieving track:', message);
-    return NextResponse.json(
-      { error: 'Failed to retrieve track info' },
-      { status: 500 }
-    );
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error('❌ [Ingest] Error in GET:', message);
+    return NextResponse.json({ error: 'Failed to retrieve track info' }, { status: 500 });
   }
 }
