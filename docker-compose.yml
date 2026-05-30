@@ -23,8 +23,10 @@ services:
       BAO_ADDR: "http://0.0.0.0:8200"
     volumes:
       # Mount mTLS certificates (optional, for production)
+      - ./security/config:/vault/config
+      - ./data/kms-store:/vault/file
       - ./security/certificates/certs:/vault/config/certs:ro
-    command: server -dev -dev-root-token-id=root-token
+    command: server -config=/vault/config/bao-config.hcl
     networks:
       - db-subnet
 
@@ -63,6 +65,7 @@ services:
     build:
       context: ./app-core
     container_name: drm_app
+    command: npm run dev
     ports:
       - "3000:3000"
     extra_hosts:
@@ -78,7 +81,7 @@ services:
 
       # OpenBao KMS (mTLS enabled if HTTPS used)
       BAO_ADDR: "http://openbao:8200"
-      BAO_DEV_ROOT_TOKEN_ID: "root-token"
+      BAO_DEV_ROOT_TOKEN_ID: "s.A6DrWqVqAXR0gKhpE2raGAMF"
       KMS_TRANSIT_KEY_NAME: "music-app-key"
 
       # Cloudflare R2 Storage
@@ -96,12 +99,15 @@ services:
 
       # mTLS Certificates (optional)
       MTLS_CERT_DIR: /app/certs
-      NODE_ENV: production
+      NODE_ENV: development
     volumes:
       # Mount mTLS client certificates
       - ./security/certificates/certs:/app/certs:ro
       # Mount packager output directory
       - ./audio:/audio
+      - ./app-core:/app
+      - /app/node_modules
+      - /app/.next
     depends_on:
       - db
       - openbao

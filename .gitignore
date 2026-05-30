@@ -155,9 +155,12 @@ vite.config.ts.timestamp-*
 /temp-audio/
 
 # Chặn toàn bộ các file phân đoạn nhạc mã hóa DRM sinh ra trong public
-public/audio/segments/*
-public/audio/manifests/
+/app-core/public/audio/segments/*
+/app-core/public/audio/manifests/*
 
 # Chặn toàn bộ file metadata tạm thời sinh ra trong thư mục tmp
 tmp/
 app-core/tmp/*
+
+#Chặn openBao
+/data/kms-store/*
