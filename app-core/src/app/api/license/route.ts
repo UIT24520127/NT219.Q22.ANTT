@@ -52,6 +52,9 @@ const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
 // POST /api/license
 // ─────────────────────────────────────────────────────────────────────────────
 export async function POST(request: Request) {
+  const startTime = Date.now();
+  const timer = licenseProcessingDuration.startTimer();
+  
   try {
     // ══════════════════════════════════════════════════════════════════════════
     // TUẦN 4 — BƯỚC 1: XÁC THỰC BEARER TOKEN
@@ -151,6 +154,7 @@ export async function POST(request: Request) {
     const encryptedCek = await getEncryptedCEKByKID(kid);
     if (!encryptedCek) {
       await logAuditEvent('LICENSE_FAILED', undefined, kid, 'SYSTEM', 'CEK not found');
+      licenseFailed.inc({ reason: 'cek_not_found', error_type: 'database' });
       return NextResponse.json({ error: 'Content not available' }, { status: 404 });
     }
 

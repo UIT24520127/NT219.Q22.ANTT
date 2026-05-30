@@ -13,7 +13,7 @@
 
 set -e
 
-CERT_DIR="${MTLS_CERT_DIR:-.}/certs"
+CERT_DIR="${MTLS_CERT_DIR:-./security/nginx}/certs"
 BAO_CONTAINER="drm_kms"
 BAO_CERT_DIR="/vault/config/certs"
 CERT_VALIDITY_DAYS=365
@@ -85,7 +85,7 @@ docker exec "$BAO_CONTAINER" chmod 444 "$BAO_CERT_DIR/server-cert.pem"
 docker exec "$BAO_CONTAINER" chmod 444 "$BAO_CERT_DIR/ca-cert.pem"
 
 # Set proper permissions locally
-chmod 400 "$CERT_DIR/server-key.pem"
+chmod 644 "$CERT_DIR/server-key.pem"
 chmod 444 "$CERT_DIR/server-cert.pem"
 
 echo ""

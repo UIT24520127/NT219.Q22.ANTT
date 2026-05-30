@@ -1,0 +1,112 @@
+groups:
+  - name: license-alerts
+    interval: 30s
+    rules:
+      # Alert when license failures exceed threshold
+      - alert: HighLicenseFailureRate
+        expr: |
+          rate(license_failed_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: license
+        annotations:
+          summary: "High license grant failure rate detected"
+          description: "License failure rate is {{ $value }} failures/second over the last 5 minutes (threshold: 0.5/s)"
+
+      # Alert for specific failure types
+      - alert: LicenseECDHHandshakeFails
+        expr: |
+          increase(license_failed_total{reason="missing_client_key"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+          component: ecdh
+        annotations:
+          summary: "ECDH handshake failures detected"
+          description: "{{ $value }} ECDH handshake failures in the last 5 minutes"
+
+      - alert: LicenseCEKNotFound
+        expr: |
+          increase(license_failed_total{reason="cek_not_found"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "CEK not found errors increasing"
+          description: "{{ $value }} CEK lookup failures in the last 5 minutes"
+
+      - alert: LicenseProcessingErrors
+        expr: |
+          increase(license_failed_total{error_type="internal"}[5m]) > 3
+        for: 2m
+        labels:
+          severity: warning
+          component: processing
+        annotations:
+          summary: "License processing errors detected"
+          description: "{{ $value }} license processing errors in the last 5 minutes"
+
+      # Performance alerts
+      - alert: HighLicenseProcessingTime
+        expr: |
+          histogram_quantile(0.95, rate(license_processing_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "License processing time is high"
+          description: "95th percentile license processing time is {{ $value }}s (threshold: 2s)"
+
+  - name: system-alerts
+    interval: 30s
+    rules:
+      # Database connectivity
+      - alert: DatabaseQueryErrors
+        expr: |
+          increase(db_errors_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database query errors increasing"
+          description: "{{ $value }} database errors in the last 5 minutes"
+
+      # KMS availability
+      - alert: KMSDecryptionErrors
+        expr: |
+          increase(kms_errors_total[5m]) > 3
+        for: 2m
+        labels:
+          severity: critical
+          component: kms
+        annotations:
+          summary: "KMS decryption errors detected"
+          description: "{{ $value }} KMS errors in the last 5 minutes"
+
+      # High HTTP error rate
+      - alert: HighHTTPErrorRate
+        expr: |
+          sum(rate(http_errors_total[5m])) by (route) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          component: http
+        annotations:
+          summary: "High HTTP error rate on {{ $labels.route }}"
+          description: "Error rate is {{ $value }} errors/second"
+
+      # Active sessions
+      - alert: UnusuallyHighActiveSessions
+        expr: |
+          active_sessions_total > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: sessions
+        annotations:
+          summary: "Unusually high number of active sessions"
+          description: "Currently {{ $value }} active sessions"
