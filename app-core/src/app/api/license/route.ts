@@ -4,6 +4,11 @@ import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
 import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import { verifyDPoPProof } from '@/lib/dpop/verify';
 import crypto from 'crypto';
+import { 
+  licenseIssued, 
+  licenseFailed, 
+  licenseProcessingDuration 
+} from '@/lib/metrics';
 
 /**
  * Lấy URL tuyệt đối của endpoint license để verify DPoP htu.

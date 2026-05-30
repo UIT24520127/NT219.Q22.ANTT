@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
 
-  # 1. MariaDB
+  # 1. MariaDB — internal only, không expose ra ngoài
   db:
     image: mariadb:10.11
     container_name: drm_mariadb
@@ -12,7 +12,7 @@ services:
     volumes:
       - ./data/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
-      - drm-network
+      - db-subnet
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -34,18 +34,15 @@ services:
       - ./security/certificates/certs:/vault/config/certs:ro
     command: server -config=/vault/config/bao-config.hcl
     networks:
-      - drm-network
+      - private-subnet
     # healthcheck:
-      # OpenBao image không có wget — dùng curl
-      # /v1/sys/health trả về các HTTP code khác nhau tùy trạng thái:
-      #   200 = initialized+unsealed, 429 = standby, 472 = recovery,
-      #   501 = not initialized (file storage, chưa init), 503 = sealed
-      # Tất cả đều có nghĩa "server đang sống" — chỉ lỗi kết nối mới là fail
-      # test: ["CMD-SHELL", "curl -sf -o /dev/null -w '%{http_code}' http://localhost:8200/v1/sys/health | grep -qE '(200|429|472|473|501|503)'"]
-      # interval: 10s
-      # timeout: 5s
-      # retries: 10
-      # start_period: 20s
+    #   # /v1/sys/health trả nhiều HTTP code khác nhau tùy trạng thái,
+    #   # tất cả đều có nghĩa "server đang sống" — chỉ lỗi kết nối mới fail
+    #   test: ["CMD-SHELL", "curl -sf -o /dev/null -w '%{http_code}' http://localhost:8200/v1/sys/health | grep -qE '(200|429|472|473|501|503)'"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 10
+    #   start_period: 20s
 
   # 3. Keycloak
   keycloak:
@@ -58,14 +55,13 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
     ports:
-      - "8080:8080"
+      - "8080:8080"   # expose để browser có thể gọi trực tiếp nếu cần
     volumes:
       - ./realm-export.json:/opt/keycloak/data/import/realm.json:ro
     command: start-dev --import-realm
     networks:
-      - drm-network
+      - private-subnet
     # healthcheck:
-    #   # Keycloak có curl sẵn, dùng endpoint /health/ready (Keycloak 23+)
     #   # start_period dài vì Keycloak mất 30-90s để boot + import realm
     #   test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
     #   interval: 15s
@@ -98,6 +94,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # Database
       DB_HOST: db
       DB_PORT: 3306
       DB_USER: root
@@ -105,10 +102,12 @@ services:
       DB_NAME: drm_system
       DATABASE_URL: "mysql://root:root_password@db:3306/drm_system"
 
+      # OpenBao KMS
       BAO_ADDR: "http://openbao:8200"
       BAO_DEV_ROOT_TOKEN_ID: "s.A6DrWqVqAXR0gKhpE2raGAMF"
       KMS_TRANSIT_KEY_NAME: "music-app-key"
 
+      # Keycloak — server dùng hostname Docker internal
       KEYCLOAK_ISSUER: "http://keycloak:8080/realms/drm-realm"
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
       KEYCLOAK_SECRET: ${KEYCLOAK_SECRET}
@@ -118,8 +117,12 @@ services:
       KEYCLOAK_DPOP_PRIVATE_JWK: ${KEYCLOAK_DPOP_PRIVATE_JWK}
       DPOP_MAX_AGE: ${DPOP_MAX_AGE:-120}
 
+      # App
       APP_URL: "http://localhost:3000"
+      # URL Keycloak mà BROWSER nhìn thấy (dùng cho NEXT_PUBLIC_*)
+      NEXT_PUBLIC_KEYCLOAK_URL: "http://localhost:8080"
 
+      # Cloudflare R2
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
       R2_REGION: auto
@@ -127,6 +130,7 @@ services:
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
       R2_ENDPOINT: "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
+      # mTLS
       MTLS_CERT_DIR: /app/certs
       NODE_ENV: development
 
@@ -146,7 +150,8 @@ services:
       #   condition: service_healthy
 
     networks:
-      - drm-network
+      - private-subnet
+      - db-subnet
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
@@ -155,7 +160,7 @@ services:
       retries: 3
       start_period: 40s
 
-  # 6. Nginx
+  # 6. Nginx — cổng duy nhất ra internet
   nginx:
     image: nginx:latest
     container_name: drm_nginx
@@ -176,7 +181,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # 7. Prometheus - Metrics collection and monitoring
+  # 7. Prometheus
   prometheus:
     image: prom/prometheus:latest
     container_name: drm_prometheus
@@ -199,7 +204,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # 8. Grafana - Visualization dashboard (Optional, for better metrics viewing)
+  # 8. Grafana
   grafana:
     image: grafana/grafana:latest
     container_name: drm_grafana
@@ -222,5 +227,14 @@ services:
       retries: 3
 
 networks:
-  drm-network:
+  public-subnet:
+    driver: bridge          # nginx expose ra ngoài
+  private-subnet:
+    driver: bridge          # app, keycloak, opa, openbao, monitoring
+  db-subnet:
     driver: bridge
+    internal: true          # db hoàn toàn cô lập, không có internet
+
+volumes:
+  prometheus_data:
+  grafana_data:
