@@ -219,7 +219,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         error: 'Upload processing failed',
-        details: process.env.NODE_ENV === 'development' ? message : undefined
+        details: message
       },
       { status: 500 }
     );

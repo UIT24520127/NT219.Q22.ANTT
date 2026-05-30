@@ -1,0 +1,53 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'drm-system-monitor'
+
+# Alertmanager configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - '/etc/prometheus/rules/*.yml'
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Application metrics endpoint
+  - job_name: 'app-metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['app:3000']
+    metrics_path: '/api/metrics'
+    relabel_configs:
+      - source_labels: [__scheme__, __address__, __metrics_path__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __scheme__
+        replacement: http
+
+  # Database metrics (if using database exporter)
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['db:3306']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # KMS/OpenBao metrics
+  - job_name: 'openbao'
+    static_configs:
+      - targets: ['openbao:8200']
+    metrics_path: '/sys/metrics'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance

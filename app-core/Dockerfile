@@ -45,8 +45,10 @@ WORKDIR /app
 RUN apk add --no-cache \
     ffmpeg \
     curl \
-    libc6-compat && \
-    curl -L https://github.com/shaka-project/shaka-packager/releases/download/v3.2.0/packager-linux-x64 -o /usr/local/bin/packager && \
+    gcompat
+
+# Download and install Shaka Packager
+RUN curl -L -o /usr/local/bin/packager https://github.com/shaka-project/shaka-packager/releases/download/v3.2.0/packager-linux-x64 && \
     chmod +x /usr/local/bin/packager
 
 # Copy package files from builder
@@ -86,7 +88,7 @@ EXPOSE 3000
 # ============================================================================
 # Environment Variables (with defaults)
 # ============================================================================
-ENV NODE_ENV=production
+ENV NODE_ENV=development
 ENV PORT=3000
 
 # ============================================================================
