@@ -4,29 +4,21 @@ import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
 import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import { verifyDPoPProof } from '@/lib/dpop/verify';
 import crypto from 'crypto';
-import { 
-  licenseIssued, 
-  licenseFailed, 
-  licenseProcessingDuration 
+import {
+  licenseIssued,
+  licenseFailed,
+  licenseProcessingDuration,
 } from '@/lib/metrics';
 
-/**
- * Lấy URL tuyệt đối của endpoint license để verify DPoP htu.
- * Ưu tiên biến môi trường APP_URL, fallback từ request headers.
- */
 const getLicenseEndpointUrl = (request: Request): string => {
   if (process.env.APP_URL) {
     return `${process.env.APP_URL.replace(/\/$/, '')}/api/license`;
   }
-  // Fallback: tái tạo từ host header (phù hợp local dev)
   const host = request.headers.get('host') || 'localhost:3000';
   const proto = host.startsWith('localhost') ? 'http' : 'https';
   return `${proto}://${host}/api/license`;
 };
 
-/**
- * Extract KID từ Widevine Challenge — giữ nguyên logic cũ
- */
 const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
   try {
     const psshSignature = Buffer.from('pssh');
@@ -53,20 +45,14 @@ const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
   return null;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/license
-// ─────────────────────────────────────────────────────────────────────────────
 export async function POST(request: Request) {
-  const startTime = Date.now();
   const timer = licenseProcessingDuration.startTimer();
-  
+
   try {
-    // ══════════════════════════════════════════════════════════════════════════
-    // TUẦN 4 — BƯỚC 1: XÁC THỰC BEARER TOKEN
-    // Lấy raw access token từ Authorization header để dùng cho ath binding
-    // ══════════════════════════════════════════════════════════════════════════
+    // ── Bước 1: Bearer token ──────────────────────────────────────────────
     const authHeader = request.headers.get('authorization') || '';
     if (!authHeader.toLowerCase().startsWith('bearer ')) {
+      licenseFailed.inc({ reason: 'missing_bearer', error_type: 'auth' });
       console.error('❌ [License] Thiếu Bearer token');
       return NextResponse.json(
         { error: 'Unauthorized: Missing Bearer token' },
@@ -75,21 +61,16 @@ export async function POST(request: Request) {
     }
     const rawAccessToken = authHeader.slice('bearer '.length).trim();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // TUẦN 4 — BƯỚC 2: XÁC THỰC DPOP PROOF
-    // Toàn bộ logic verify nằm trong lib/dpop/verify.ts
-    // ══════════════════════════════════════════════════════════════════════════
+    // ── Bước 2: DPoP proof ────────────────────────────────────────────────
     const dpopHeader = request.headers.get('dpop');
     if (!dpopHeader) {
+      licenseFailed.inc({ reason: 'missing_dpop', error_type: 'auth' });
       console.error('❌ [License] Thiếu DPoP header');
       return NextResponse.json(
         { error: 'DPoP proof required', hint: 'Thêm header DPoP: <proof_jwt>' },
         {
           status: 401,
-          headers: {
-            // RFC 9449: server thông báo scheme được chấp nhận
-            'WWW-Authenticate': 'DPoP algs="ES256"',
-          },
+          headers: { 'WWW-Authenticate': 'DPoP algs="ES256"' },
         }
       );
     }
@@ -103,6 +84,7 @@ export async function POST(request: Request) {
     });
 
     if (!dpopResult.valid) {
+      licenseFailed.inc({ reason: 'invalid_dpop', error_type: 'auth' });
       console.error(`❌ [License] DPoP verify thất bại: ${dpopResult.error}`);
       await logAuditEvent('LICENSE_FAILED', undefined, undefined, 'SYSTEM', `DPoP: ${dpopResult.error}`);
       return NextResponse.json(
@@ -116,28 +98,22 @@ export async function POST(request: Request) {
 
     console.log('✅ [License] DPoP proof hợp lệ.');
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // PHẦN CŨ — GIỮ NGUYÊN TỪ TUẦN 3
-    // ══════════════════════════════════════════════════════════════════════════
-
-    // 1. Nhận Widevine Challenge
+    // ── Bước 3: Widevine Challenge ────────────────────────────────────────
     const challengeArrayBuffer = await request.arrayBuffer();
     const challengeBuffer = Buffer.from(challengeArrayBuffer);
 
-    // Challenge body có thể rỗng khi client dùng JSON stub thay vì Widevine thật
-    // → vẫn cho qua nếu KID có từ header
     let kid: string | null = null;
     if (challengeBuffer.length > 0) {
       kid = extractKIDFromChallenge(challengeBuffer);
     }
 
-    // Fallback: KID từ header
     if (!kid) {
       kid = request.headers.get('x-kid');
       if (kid) console.log(`ℹ️  [License] KID từ header: ${kid}`);
     }
 
     if (!kid) {
+      licenseFailed.inc({ reason: 'missing_kid', error_type: 'validation' });
       console.error('❌ [License] Không có KID');
       return NextResponse.json(
         { error: 'No KID provided in challenge or headers' },
@@ -145,41 +121,42 @@ export async function POST(request: Request) {
       );
     }
 
-    // 2. Lấy public key ECDH của client (tuần 3)
+    // ── Bước 4: ECDH client key ───────────────────────────────────────────
     const clientPublicKeyHex = request.headers.get('x-client-public-key');
     if (!clientPublicKeyHex) {
+      licenseFailed.inc({ reason: 'missing_client_key', error_type: 'ecdh' });
       return NextResponse.json(
         { error: 'ECDH Handshake Required: Missing client public key' },
         { status: 400 }
       );
     }
 
-    // 3. Tra cứu CEK trong database
+    // ── Bước 5: Tra cứu CEK ──────────────────────────────────────────────
     console.log(`🔍 [License] Lookup CEK cho KID: ${kid}`);
     const encryptedCek = await getEncryptedCEKByKID(kid);
     if (!encryptedCek) {
-      await logAuditEvent('LICENSE_FAILED', undefined, kid, 'SYSTEM', 'CEK not found');
       licenseFailed.inc({ reason: 'cek_not_found', error_type: 'database' });
+      await logAuditEvent('LICENSE_FAILED', undefined, kid, 'SYSTEM', 'CEK not found');
       return NextResponse.json({ error: 'Content not available' }, { status: 404 });
     }
 
-    // 4. Giải mã CEK từ OpenBao KMS
+    // ── Bước 6: Giải mã CEK từ KMS ───────────────────────────────────────
     console.log('🔓 [License] Giải mã CEK từ OpenBao...');
     const plaintextCek = (await kmsService.decryptKey(encryptedCek)).trim();
 
     if (plaintextCek.length !== 32 || !/^[0-9a-f]+$/i.test(plaintextCek)) {
-      console.error(`❌ [License] CEK không hợp lệ sau giải mã. Length: ${plaintextCek.length}`);
+      console.error(`❌ [License] CEK không hợp lệ. Length: ${plaintextCek.length}`);
       throw new Error('Invalid CEK format');
     }
     console.log(`✅ [License] Giải mã CEK thành công cho KID: ${kid}`);
 
-    // 5. Wrap CEK bằng ECDH (tuần 3)
+    // ── Bước 7: Wrap CEK bằng ECDH ───────────────────────────────────────
     const { serverPublicKeyHex, wrappedCekHex, ivHex } = wrapCekWithECDH(
       clientPublicKeyHex,
       plaintextCek
     );
 
-    // 6. Tạo License payload
+    // ── Bước 8: Build license payload ────────────────────────────────────
     const licensePayload = {
       kid,
       wrappedCek: wrappedCekHex,
@@ -190,7 +167,7 @@ export async function POST(request: Request) {
     };
     const licensePayloadBuffer = Buffer.from(JSON.stringify(licensePayload));
 
-    // 7. Ký số ECDSA (giữ nguyên từ tuần 3)
+    // ── Bước 9: Ký số ECDSA ──────────────────────────────────────────────
     const { privateKey } = crypto.generateKeyPairSync('ec' as any, {
       namedCurve: 'prime256v1',
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
@@ -199,7 +176,7 @@ export async function POST(request: Request) {
     signer.update(licensePayloadBuffer);
     const signatureBuffer = signer.sign({ key: privateKey, dsaEncoding: 'ieee-p1363' });
 
-    // 8. Đóng gói binary: [4-byte length][payload][signature]
+    // ── Bước 10: Đóng gói binary [4-byte len][payload][sig] ──────────────
     const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
     finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0);
     licensePayloadBuffer.copy(finalLicenseBuffer, 4);
@@ -207,6 +184,9 @@ export async function POST(request: Request) {
 
     console.log(`📦 [License] Hoàn tất! Size: ${finalLicenseBuffer.length} bytes`);
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
+
+    licenseIssued.inc({ kid });
+    timer({ kid });
 
     return new NextResponse(finalLicenseBuffer, {
       headers: {
@@ -219,6 +199,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: unknown) {
+    timer({ kid: 'unknown' });
     console.error('💥 [License CRITICAL ERROR]');
     if (error instanceof Error) {
       console.error('Chi tiết:', error.message);
@@ -234,7 +215,6 @@ export async function POST(request: Request) {
   }
 }
 
-// CORS preflight
 export async function OPTIONS() {
   return new NextResponse(null, {
     headers: {
