@@ -1,113 +1,102 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { r2Service } from '@/lib/storage/r2';
+// app/api/media/signed-url/route.ts
+import { NextResponse } from 'next/server';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-export interface SignedUrlBatchRequest {
-  keys: string[];
-  expiresIn?: number;
-}
+const r2Client = new S3Client({
+  region: 'auto',
+  endpoint: process.env.R2_ENDPOINT!,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+});
 
-export interface SignedUrlBatchResponse {
-  success: boolean;
-  urls: Array<{
-    key: string;
-    url: string;
-    expiresAt: string;
-  }>;
-  expiresIn: number;
-}
+// Chỉ cho phép path trong bucket encrypted-audio
+const ALLOWED_PATH_REGEX = /^[a-zA-Z0-9_\-\/\.]+\.(?:mpd|m4s|mp4|mp4a|init|m4a)$/;
+const PRESIGNED_URL_TTL = 300; // 5 phút
 
-/**
- * POST /api/media/signed-urls
- * Generate multiple signed URLs in one request
- * Useful for DASH manifest segments that need time-limited access
- * 
- * Request Body:
- *   {
- *     "keys": ["audio/track-123/segment1.m4s", "audio/track-123/segment2.m4s"],
- *     "expiresIn": 300  // optional, default 5 minutes
- *   }
- * 
- * Response:
- *   {
- *     "success": true,
- *     "urls": [
- *       { "key": "...", "url": "https://...", "expiresAt": "2026-05-22T10:30:00Z" },
- *       ...
- *     ],
- *     "expiresIn": 300
- *   }
- */
-export async function POST(request: NextRequest) {
+export async function GET(request: Request) {
+  // ── Auth check ────────────────────────────────────────────────────────────
+  const authHeader = request.headers.get('authorization') || '';
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // Verify JWT còn hạn (basic check — full verify nên dùng Keycloak introspect)
   try {
-    const body = await request.json() as SignedUrlBatchRequest;
-
-    // Validate input
-    if (!body.keys || !Array.isArray(body.keys) || body.keys.length === 0) {
-      return NextResponse.json(
-        { error: 'Missing or invalid "keys" array' },
-        { status: 400 }
-      );
-    }
-
-    // Limit batch size to prevent abuse
-    if (body.keys.length > 100) {
-      return NextResponse.json(
-        { error: 'Maximum 100 keys per request' },
-        { status: 400 }
-      );
-    }
-
-    // Validate expiration time
-    let expiresInSeconds = 300;
-    if (body.expiresIn) {
-      if (isNaN(body.expiresIn) || body.expiresIn < 60 || body.expiresIn > 3600) {
-        return NextResponse.json(
-          { error: 'expiresIn must be between 60 and 3600 seconds' },
-          { status: 400 }
-        );
-      }
-      expiresInSeconds = body.expiresIn;
-    }
-
-    console.log(`🔐 [API] Generating ${body.keys.length} signed URLs (expires in ${expiresInSeconds}s)`);
-
-    // Generate signed URLs for all keys
-    const urls = await Promise.all(
-      body.keys.map(async (key) => {
-        try {
-          // Validate key format
-          if (key.includes('..') || key.startsWith('/')) {
-            throw new Error('Invalid key format');
-          }
-
-          const result = await r2Service.generateSignedUrl(key, expiresInSeconds);
-          return {
-            key,
-            url: result.url,
-            expiresAt: result.expiresAt.toISOString(),
-          };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error(`❌ [API] Failed for key ${key}:`, message);
-          throw error;
-        }
-      })
+    const token = authHeader.slice(7);
+    const payload = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64url').toString()
     );
+    if (payload.exp && payload.exp * 1000 < Date.now()) {
+      return NextResponse.json({ error: 'Token expired' }, { status: 401 });
+    }
+  } catch {
+    return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+  }
 
-    console.log(`✅ [API] Successfully generated ${urls.length} signed URLs`);
+  // ── Validate key param ────────────────────────────────────────────────────
+  const { searchParams } = new URL(request.url);
+  const key = searchParams.get('key');
 
-    return NextResponse.json({
-      success: true,
-      urls,
-      expiresIn: expiresInSeconds,
-    } as SignedUrlBatchResponse);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    console.error('❌ [API] Error generating signed URLs:', message);
+  if (!key) {
+    return NextResponse.json(
+      { error: 'Missing ?key= parameter' },
+      { status: 400 }
+    );
+  }
+
+  // Chặn path traversal + chỉ cho phép file media hợp lệ
+  const normalizedKey = key.replace(/^\/+/, ''); // strip leading slash
+  if (
+    normalizedKey.includes('..') ||
+    normalizedKey.includes('//') ||
+    !ALLOWED_PATH_REGEX.test(normalizedKey)
+  ) {
+    return NextResponse.json(
+      { error: 'Invalid key path' },
+      { status: 400 }
+    );
+  }
+
+  // ── Tạo presigned URL ─────────────────────────────────────────────────────
+  try {
+    const command = new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME!,
+      Key: normalizedKey,
+    });
+
+    const signedUrl = await getSignedUrl(r2Client, command, {
+      expiresIn: PRESIGNED_URL_TTL,
+    });
+
+    console.log(`✅ [SignedURL] Issued for key: ${normalizedKey}`);
 
     return NextResponse.json(
-      { error: 'Failed to generate signed URLs', details: message },
+      { url: signedUrl, expiresIn: PRESIGNED_URL_TTL },
+      {
+        headers: {
+          // Không cache presigned URL trên client
+          'Cache-Control': 'no-store',
+        },
+      }
+    );
+  } catch (err: unknown) {
+    console.error('❌ [SignedURL] R2 error:', err);
+    return NextResponse.json(
+      { error: 'Failed to generate signed URL' },
       { status: 500 }
     );
   }
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    },
+  });
 }

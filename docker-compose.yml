@@ -118,7 +118,7 @@ services:
       DPOP_MAX_AGE: ${DPOP_MAX_AGE:-120}
 
       # App
-      APP_URL: "http://localhost:3000"
+      APP_URL: "https://localhost"
       # URL Keycloak mà BROWSER nhìn thấy (dùng cho NEXT_PUBLIC_*)
       NEXT_PUBLIC_KEYCLOAK_URL: "http://localhost:8080"
 

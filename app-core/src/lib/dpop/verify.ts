@@ -1,135 +1,130 @@
-/**
- * DPoP Proof Verifier — RFC 9449
- *
- * Kiểm tra DPoP proof JWT gửi kèm mỗi request xin License:
- *   1. Đúng cấu trúc header: typ=dpop+jwt, alg=ES256, jwk có public key
- *   2. Chữ ký hợp lệ (tự verify bằng public key nhúng trong header)
- *   3. htm khớp HTTP method, htu khớp URL endpoint
- *   4. iat không quá cũ / quá mới (clock skew ±60s, window 2 phút)
- *   5. jti chưa từng thấy (chống replay)
- *   6. ath = BASE64URL(SHA-256(access_token)) — token binding
- */
+// lib/dpop/verify.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify DPoP proof theo RFC 9449.
+// Tích hợp JTI blacklist (Redis) để chặn replay attack.
+// ─────────────────────────────────────────────────────────────────────────────
 
 import * as jose from 'jose';
 import crypto from 'crypto';
-import { checkAndMarkJTI } from './replay-store';
+import { checkAndMarkJTI } from './jti-store';
+
+// jose v5+: KeyLike bị xóa, dùng CryptoKey | Uint8Array
+type JoseKey = CryptoKey | Uint8Array;
 
 export interface DPoPVerifyOptions {
-  /** Raw DPoP proof JWT string từ header 'DPoP' */
   proof: string;
-  /** HTTP method của request, VD: "POST" */
-  htm: string;
-  /** Full URL của endpoint, VD: "https://example.com/api/license" */
-  htu: string;
-  /** Raw Bearer access token string (không có tiền tố "Bearer ") */
-  accessToken: string;
-  /** Cho phép clock skew tính bằng giây (default 60) */
-  clockSkewSeconds?: number;
-  /** Cửa sổ thời gian proof hợp lệ tính bằng giây (default 120) */
-  maxAgeSeconds?: number;
+  htm: string;         // HTTP method, e.g. "POST"
+  htu: string;         // HTTP URI (endpoint URL)
+  accessToken: string; // Raw Bearer token để verify ath claim
+  maxAgeSeconds?: number; // Default: 120s
 }
 
 export interface DPoPVerifyResult {
   valid: boolean;
   error?: string;
-  /** Public key JWK nhúng trong proof header (để liên kết với session nếu cần) */
-  publicKeyJwk?: jose.JWK;
+  payload?: jose.JWTPayload;
 }
 
+const MAX_CLOCK_SKEW_SECONDS = 30;
+
 export async function verifyDPoPProof(opts: DPoPVerifyOptions): Promise<DPoPVerifyResult> {
-  const {
-    proof,
-    htm,
-    htu,
-    accessToken,
-    clockSkewSeconds = 60,
-    maxAgeSeconds = 120,
-  } = opts;
+  const { proof, htm, htu, accessToken, maxAgeSeconds = 120 } = opts;
 
   try {
-    // ── Bước 0: Decode header mà KHÔNG verify chữ ký trước (để lấy jwk)
+    // ── 1. Decode header (unverified) để lấy JWK public key ────────────────
     const protectedHeader = jose.decodeProtectedHeader(proof);
 
-    // ── Bước 1: Validate header fields
     if (protectedHeader.typ !== 'dpop+jwt') {
-      return { valid: false, error: 'DPoP header typ phải là dpop+jwt' };
+      return { valid: false, error: 'DPoP proof phải có typ=dpop+jwt' };
     }
     if (protectedHeader.alg !== 'ES256') {
-      return { valid: false, error: 'DPoP chỉ chấp nhận alg ES256' };
+      return { valid: false, error: 'Chỉ hỗ trợ alg=ES256' };
     }
     if (!protectedHeader.jwk) {
-      return { valid: false, error: 'DPoP header thiếu jwk (public key)' };
+      return { valid: false, error: 'Header thiếu jwk' };
     }
 
-    const jwk = protectedHeader.jwk as jose.JWK;
-    if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') {
-      return { valid: false, error: 'DPoP jwk phải là EC P-256' };
-    }
-    // Đảm bảo jwk KHÔNG chứa private key (d field)
-    if ('d' in jwk) {
-      return { valid: false, error: 'DPoP jwk không được chứa private key' };
+    // ── 2. Import public key từ header JWK ──────────────────────────────────
+    let publicKey: JoseKey;
+    try {
+      publicKey = await jose.importJWK(protectedHeader.jwk as jose.JWK, 'ES256') as JoseKey;
+    } catch {
+      return { valid: false, error: 'JWK trong header không hợp lệ' };
     }
 
-    // ── Bước 2: Verify chữ ký bằng public key nhúng trong header
-    const publicKey = await jose.importJWK(jwk, 'ES256');
+    // ── 3. Verify signature + decode payload ────────────────────────────────
     let payload: jose.JWTPayload;
     try {
       const result = await jose.jwtVerify(proof, publicKey, {
-        // Không check issuer/audience — DPoP proof không có
-        clockTolerance: `${clockSkewSeconds}s`,
+        typ: 'dpop+jwt',
+        algorithms: ['ES256'],
       });
       payload = result.payload;
-    } catch (e: any) {
-      return { valid: false, error: `Chữ ký DPoP không hợp lệ: ${e.message}` };
+    } catch (err: any) {
+      return { valid: false, error: `Signature không hợp lệ: ${err.message}` };
     }
 
-    // ── Bước 3: Kiểm tra htm (HTTP method)
-    if (typeof payload['htm'] !== 'string' || payload['htm'].toUpperCase() !== htm.toUpperCase()) {
-      return { valid: false, error: `DPoP htm không khớp: expected=${htm}, got=${payload['htm']}` };
+    // ── 4. Kiểm tra htm (HTTP method) ───────────────────────────────────────
+    if ((payload.htm as string)?.toUpperCase() !== htm.toUpperCase()) {
+      return {
+        valid: false,
+        error: `htm mismatch: expected ${htm.toUpperCase()}, got ${payload.htm}`,
+      };
     }
 
-    // ── Bước 4: Kiểm tra htu (HTTP URL) — so sánh không phân biệt trailing slash
-    const normalizeUrl = (u: string) => u.replace(/\/$/, '').split('?')[0];
-    if (typeof payload['htu'] !== 'string' || normalizeUrl(payload['htu']) !== normalizeUrl(htu)) {
-      return { valid: false, error: `DPoP htu không khớp: expected=${htu}, got=${payload['htu']}` };
+    // ── 5. Kiểm tra htu (HTTP URI) ──────────────────────────────────────────
+    // So sánh không phân biệt trailing slash
+    const normalizeUrl = (u: string) => u.replace(/\/$/, '').toLowerCase();
+    if (normalizeUrl(payload.htu as string) !== normalizeUrl(htu)) {
+      return {
+        valid: false,
+        error: `htu mismatch: expected ${htu}, got ${payload.htu}`,
+      };
     }
 
-    // ── Bước 5: Kiểm tra iat (issued at) — chống proof quá cũ
-    if (typeof payload.iat !== 'number') {
-      return { valid: false, error: 'DPoP thiếu iat' };
+    // ── 6. Kiểm tra iat (issued at) — chặn proof quá cũ hoặc từ tương lai ──
+    const now = Math.floor(Date.now() / 1000);
+    const iat = payload.iat as number;
+    if (!iat) {
+      return { valid: false, error: 'Proof thiếu claim iat' };
     }
-    const nowSec = Math.floor(Date.now() / 1000);
-    const age = nowSec - payload.iat;
-    if (age > maxAgeSeconds + clockSkewSeconds) {
-      return { valid: false, error: `DPoP proof quá cũ: age=${age}s, max=${maxAgeSeconds}s` };
+    if (iat > now + MAX_CLOCK_SKEW_SECONDS) {
+      return { valid: false, error: 'Proof có iat từ tương lai (clock skew > 30s)' };
     }
-    if (age < -(clockSkewSeconds)) {
-      return { valid: false, error: `DPoP proof từ tương lai: age=${age}s` };
-    }
-
-    // ── Bước 6: Kiểm tra jti (chống replay)
-    if (typeof payload['jti'] !== 'string' || payload['jti'].trim() === '') {
-      return { valid: false, error: 'DPoP thiếu jti' };
-    }
-    const isNew = checkAndMarkJTI(payload['jti'], (maxAgeSeconds + clockSkewSeconds) * 1000);
-    if (!isNew) {
-      return { valid: false, error: 'DPoP jti đã được dùng (replay attack)' };
+    if (now - iat > maxAgeSeconds + MAX_CLOCK_SKEW_SECONDS) {
+      return { valid: false, error: `Proof đã hết hạn (age > ${maxAgeSeconds}s)` };
     }
 
-    // ── Bước 7: Kiểm tra ath — access token hash binding (RFC 9449 §4.3)
-    if (typeof payload['ath'] !== 'string') {
-      return { valid: false, error: 'DPoP thiếu ath (access token hash)' };
-    }
-    const expectedAth = jose.base64url.encode(
-      crypto.createHash('sha256').update(accessToken).digest()
-    );
-    if (payload['ath'] !== expectedAth) {
-      return { valid: false, error: 'DPoP ath không khớp access token' };
+    // ── 7. Kiểm tra jti tồn tại ─────────────────────────────────────────────
+    const jti = payload.jti as string;
+    if (!jti) {
+      return { valid: false, error: 'Proof thiếu claim jti' };
     }
 
-    return { valid: true, publicKeyJwk: jwk };
+    // ── 8. Kiểm tra ath (access token hash) ─────────────────────────────────
+    const ath = payload.ath as string;
+    if (!ath) {
+      return { valid: false, error: 'Proof thiếu claim ath' };
+    }
+    const expectedAth = crypto
+      .createHash('sha256')
+      .update(accessToken)
+      .digest('base64url');
+    if (ath !== expectedAth) {
+      return { valid: false, error: 'ath không khớp với access token' };
+    }
 
-  } catch (e: any) {
-    return { valid: false, error: `DPoP verify lỗi nội bộ: ${e.message}` };
+    // ── 9. JTI blacklist check (Redis) — PHẢI sau tất cả verify khác ────────
+    // Chỉ đánh dấu jti đã dùng khi proof hợp lệ về mọi mặt khác,
+    // tránh spam Redis với proof rác.
+    const jtiOk = await checkAndMarkJTI(jti);
+    if (!jtiOk) {
+      return { valid: false, error: `DPoP replay detected: jti=${jti} đã được dùng` };
+    }
+
+    return { valid: true, payload };
+
+  } catch (err: any) {
+    return { valid: false, error: `Lỗi không xác định: ${err.message}` };
   }
 }

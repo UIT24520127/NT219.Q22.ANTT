@@ -22,8 +22,10 @@ const getLicenseEndpointUrl = (request: Request): string => {
   if (process.env.APP_URL) {
     return `${process.env.APP_URL.replace(/\/$/, '')}/api/license`;
   }
-  const host = request.headers.get('host') || 'localhost:3000';
-  const proto = host.startsWith('localhost') ? 'http' : 'https';
+  // Fallback: dùng header từ nginx (X-Forwarded-Proto)
+  const host = request.headers.get('host') || 'localhost';
+  const proto = request.headers.get('x-forwarded-proto') || 
+                (host.startsWith('localhost') ? 'http' : 'https');
   return `${proto}://${host}/api/license`;
 };
 
