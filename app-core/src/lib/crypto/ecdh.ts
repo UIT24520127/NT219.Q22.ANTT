@@ -1,51 +1,75 @@
 import crypto from 'crypto';
 
 interface KeyWrappingResult {
-  serverPublicKeyHex: string; // Gửi cái này cho client phối khóa
-  wrappedCekHex: string;       // Cục CEK đã được bọc bảo mật bằng AES-GCM
-  ivHex: string;               // Vector khởi tạo của AES
+  serverPublicKeyHex: string;
+  wrappedCekHex: string;
+  ivHex: string;
 }
 
 /**
- * Tuần 3 - Người A: ECDH Key Wrapping (Server-side)
- * @param clientPublicKeyHex Public Key dạng Hex gửi từ phía Client
- * @param plaintextCek Chuỗi khóa CEK thô nhận từ OpenBao KMS
+ * ECDH Key Wrapping (Server-side) — upgraded to X25519 + HKDF
+ * @param clientPublicKeyHex Public Key hex từ client (X25519, 32 bytes = 64 hex chars)
+ * @param plaintextCek CEK hex string từ OpenBao KMS
  */
 export function wrapCekWithECDH(
   clientPublicKeyHex: string,
   plaintextCek: string
 ): KeyWrappingResult {
-  // 1. Khởi tạo ECDH trên Server bằng curve prime256v1
-  const serverEcdh = crypto.createECDH('prime256v1');
-  serverEcdh.generateKeys(); // Sinh cặp khóa Server dùng một lần
+  // 1. Sinh X25519 keypair server (ephemeral, dùng 1 lần)
+  const serverKeyPair = crypto.generateKeyPairSync('x25519', {
+    publicKeyEncoding:  { type: 'spki',  format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'der' },
+  });
 
-  const serverPublicKeyHex = serverEcdh.getPublicKey('hex');
+  // X25519 SPKI DER: 32 bytes cuối là raw public key
+  const serverPublicKeyRaw = serverKeyPair.publicKey.slice(-32);
+  const serverPublicKeyHex = serverPublicKeyRaw.toString('hex');
 
-  // 2. Tính toán Shared Secret (Bí mật chung) bằng Private Key Server + Public Key Client
-  const clientPublicKeyBuffer = Buffer.from(clientPublicKeyHex, 'hex');
-  const sharedSecret = serverEcdh.computeSecret(clientPublicKeyBuffer);
+  // 2. Import client public key (raw 32 bytes → SPKI DER)
+  // X25519 SPKI DER prefix chuẩn (12 bytes)
+  const spkiPrefix = Buffer.from('302a300506032b656e032100', 'hex');
+  const clientRawBuf = Buffer.from(clientPublicKeyHex, 'hex');
+  const clientSpki = Buffer.concat([spkiPrefix, clientRawBuf]);
 
-  // 3. Dùng KDF (SHA-256) băm Shared Secret ra thành khóa đối xứng AES 256-bit
-  const aesKey = crypto.createHash('sha256').update(sharedSecret).digest();
+  const clientPublicKey = crypto.createPublicKey({
+    key: clientSpki,
+    format: 'der',
+    type: 'spki',
+  });
 
-  console.log('🛡️ [Server Debug] Client Public Key Hex:', clientPublicKeyHex);
-  console.log('🛡️ [Server Debug] Server Public Key Hex:', serverPublicKeyHex);
-  console.log('🛡️ [Server Debug] Derived AES Key (SHA-256 KDF) Hex:', aesKey.toString('hex'));
+  const serverPrivateKey = crypto.createPrivateKey({
+    key: serverKeyPair.privateKey,
+    format: 'der',
+    type: 'pkcs8',
+  });
 
-  // 4. Mã hóa AES-256-GCM để bọc khóa CEK
-  const iv = crypto.randomBytes(12); // Chuẩn mã hóa GCM dùng IV 12 bytes
-  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  // 3. ECDH → shared secret
+  const sharedSecret = crypto.diffieHellman({
+    privateKey: serverPrivateKey,
+    publicKey: clientPublicKey,
+  });
+
+  // 4. HKDF thay SHA-256 đơn giản — đúng chuẩn hơn
+  const aesKey = crypto.hkdfSync(
+    'sha256',
+    sharedSecret,
+    Buffer.alloc(0),           // salt (empty OK cho ephemeral key)
+    Buffer.from('cek-wrapping-v1'),  // info / context
+    32                          // 256-bit AES key
+  );
+
+  // 5. AES-256-GCM wrap CEK
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(aesKey), iv);
 
   let wrappedCek = cipher.update(Buffer.from(plaintextCek, 'hex'));
   wrappedCek = Buffer.concat([wrappedCek, cipher.final()]);
-  
-  // Lấy Authentication Tag để chống giả mạo gói tin
   const authTag = cipher.getAuthTag();
   const finalWrappedCekBuffer = Buffer.concat([wrappedCek, authTag]);
 
   return {
     serverPublicKeyHex,
     wrappedCekHex: finalWrappedCekBuffer.toString('hex'),
-    ivHex: iv.toString('hex')
+    ivHex: iv.toString('hex'),
   };
 }

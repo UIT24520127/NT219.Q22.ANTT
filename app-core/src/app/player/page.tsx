@@ -85,8 +85,25 @@ function PlayerInner() {
   // ── Auth guard ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const token = localStorage.getItem('token');
+    const returnUrl = window.location.pathname + window.location.search;
+
     if (!token) {
-      const returnUrl = window.location.pathname + window.location.search;
+      router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
+      return;
+    }
+
+    // Kiểm tra token hết hạn (JWT exp claim)
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      const isExpired = payload.exp && payload.exp * 1000 < Date.now();
+      if (isExpired) {
+        console.warn('⚠️ [Auth] Token hết hạn, xóa và redirect login');
+        localStorage.removeItem('token');
+        router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
+      }
+    } catch {
+      // Token không phải JWT hợp lệ → xóa và redirect
+      localStorage.removeItem('token');
       router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
     }
   }, [router]);
@@ -116,10 +133,11 @@ function PlayerInner() {
     (async () => {
       try {
         if (!globalECDHKeyPair) {
-          setStatusLog('🔑 Khởi tạo ECDH keypair...');
+          setStatusLog('🔑 Khởi tạo X25519 keypair...');
           globalECDHKeyPair = await crypto.subtle.generateKey(
-            { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
-          );
+            { name: 'X25519' }, true, ['deriveKey', 'deriveBits']
+          ) as CryptoKeyPair;
+          // X25519 raw public key = 32 bytes
           const raw = await crypto.subtle.exportKey('raw', globalECDHKeyPair.publicKey);
           globalECDHPublicKeyHex = Array.from(new Uint8Array(raw))
             .map(b => b.toString(16).padStart(2, '0')).join('');
@@ -199,31 +217,46 @@ function PlayerInner() {
         new TextDecoder().decode(responseBuf.slice(4, 4 + payloadLen))
       );
 
-      // ── 3. ECDH unwrap CEK ────────────────────────────────────────────────
-      setStatusLog('🔓 Đang giải mã CEK qua ECDH...');
+      // ── 3. X25519 unwrap CEK ──────────────────────────────────────────────
+      setStatusLog('🔓 Đang giải mã CEK qua X25519...');
 
-      // Fix: dùng hexToBuffer trả về ArrayBuffer thay vì Uint8Array
+      // Import server public key (raw 32 bytes)
       const serverPubKey = await crypto.subtle.importKey(
         'raw', hexToBuffer(licenseData.serverPublicKey),
-        { name: 'ECDH', namedCurve: 'P-256' }, false, []
+        { name: 'X25519' }, false, []
       );
+
+      // Derive shared secret (256 bits)
       const sharedBits = await crypto.subtle.deriveBits(
-        { name: 'ECDH', public: serverPubKey },
+        { name: 'X25519', public: serverPubKey },
         globalECDHKeyPair.privateKey, 256
       );
-      const aesKeyBuf = await crypto.subtle.digest('SHA-256', sharedBits);
+
+      // HKDF: shared secret → AES-256 key (khớp với server dùng HKDF)
+      const hkdfKey = await crypto.subtle.importKey(
+        'raw', sharedBits, { name: 'HKDF' }, false, ['deriveBits']
+      );
+      const aesKeyBuf = await crypto.subtle.deriveBits(
+        {
+          name: 'HKDF',
+          hash: 'SHA-256',
+          salt: new Uint8Array(0),
+          info: new TextEncoder().encode('cek-wrapping-v1'),
+        },
+        hkdfKey, 256
+      );
       const aesKey = await crypto.subtle.importKey(
         'raw', aesKeyBuf, { name: 'AES-GCM' }, false, ['decrypt']
       );
 
-      // wrappedCek = ciphertext + 16-byte GCM auth tag
+      // Decrypt: wrappedCek = ciphertext + 16-byte GCM auth tag
       const cekBuf = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: hexToBuffer(licenseData.iv), tagLength: 128 },
         aesKey,
         hexToBuffer(licenseData.wrappedCek)
       );
 
-      // cekBuf là raw binary (16 bytes) → chuyển sang hex string 32 ký tự
+      // cekBuf là raw binary (16 bytes) → hex string 32 ký tự
       const cekHex = Array.from(new Uint8Array(cekBuf))
         .map(b => b.toString(16).padStart(2, '0')).join('');
       console.log('✅ [Player] CEK unwrapped, length:', cekHex.length); // phải là 32

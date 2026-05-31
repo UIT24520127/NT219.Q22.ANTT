@@ -4,11 +4,19 @@ import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
 import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import { verifyDPoPProof } from '@/lib/dpop/verify';
 import crypto from 'crypto';
+import { Ratelimit } from '@upstash/ratelimit';
+import { Redis } from '@upstash/redis';
 import {
   licenseIssued,
   licenseFailed,
   licenseProcessingDuration,
 } from '@/lib/metrics';
+
+const ratelimit = new Ratelimit({
+  redis: Redis.fromEnv(),
+  limiter: Ratelimit.slidingWindow(10, '1 m'), // 10 license/phút/user
+  prefix: 'license_rl',
+});
 
 const getLicenseEndpointUrl = (request: Request): string => {
   if (process.env.APP_URL) {
@@ -60,6 +68,33 @@ export async function POST(request: Request) {
       );
     }
     const rawAccessToken = authHeader.slice('bearer '.length).trim();
+
+    // ── Bước 1.5: Rate limiting (trước DPoP để chặn sớm, tiết kiệm CPU) ──
+    let userId = 'anonymous';
+    try {
+      const payload = JSON.parse(
+        Buffer.from(rawAccessToken.split('.')[1], 'base64url').toString()
+      );
+      userId = payload.sub || payload.userId || payload.email || 'anonymous';
+    } catch { /* token không phải JWT chuẩn, dùng anonymous */ }
+
+    const { success, limit, remaining } = await ratelimit.limit(userId);
+    if (!success) {
+      licenseFailed.inc({ reason: 'rate_limited', error_type: 'auth' });
+      console.warn(`⚠️  [License] Rate limit hit cho user: ${userId}`);
+      await logAuditEvent('LICENSE_FAILED', undefined, undefined, userId, 'rate_limited');
+      return NextResponse.json(
+        { error: 'Too many requests', hint: 'Thử lại sau 1 phút' },
+        {
+          status: 429,
+          headers: {
+            'X-RateLimit-Limit': String(limit),
+            'X-RateLimit-Remaining': String(remaining),
+            'Retry-After': '60',
+          },
+        }
+      );
+    }
 
     // ── Bước 2: DPoP proof ────────────────────────────────────────────────
     const dpopHeader = request.headers.get('dpop');
@@ -199,7 +234,7 @@ export async function POST(request: Request) {
     });
 
   } catch (error: unknown) {
-    timer({ kid: 'unknown' });
+    timer({});
     console.error('💥 [License CRITICAL ERROR]');
     if (error instanceof Error) {
       console.error('Chi tiết:', error.message);
