@@ -1,116 +1,138 @@
 #!/bin/bash
 
 # ============================================================================
-# CONFIGURE OPENBAO WITH TLS CERTIFICATES
+# GENERATE OPENBAO SERVER TLS CERTIFICATE
 # ============================================================================
-# This script configures OpenBao to use TLS for secure communication.
-# It generates server certificates that OpenBao will use.
+# Tạo server cert cho OpenBao — ký bởi CA nội bộ.
+# PHẢI chạy generate-mtls-certs.sh trước.
 #
-# USAGE:
-#   chmod +x security/certificates/setup-openbao-tls.sh
-#   ./security/certificates/setup-openbao-tls.sh
+# KHÔNG dùng `docker cp` — cert được mount qua volume:
+#   openbao → ./security/certificates/certs:/vault/config/certs:ro
+# Sau khi chạy script này, chỉ cần restart container là OpenBao nhận cert mới.
+#
+# Để OpenBao thực sự dùng TLS, cấu hình bao-config.hcl:
+#   listener "tcp" {
+#     address       = "0.0.0.0:8200"
+#     tls_cert_file = "/vault/config/certs/server-cert.pem"
+#     tls_key_file  = "/vault/config/certs/server-key.pem"
+#     tls_client_ca_file = "/vault/config/certs/ca-cert.pem"  # bật mTLS
+#   }
+# Sau đó đổi BAO_ADDR=https://openbao:8200 trong .env
 # ============================================================================
 
-set -e
+set -euo pipefail
 
-CERT_DIR="${MTLS_CERT_DIR:-./security/nginx}/certs"
-BAO_CONTAINER="drm_kms"
-BAO_CERT_DIR="/vault/config/certs"
+CERT_DIR="${MTLS_CERT_DIR:-./security/certificates/certs}"
 CERT_VALIDITY_DAYS=365
 
 echo "========================================================================="
-echo "  OpenBao TLS Configuration Setup"
+echo "  OpenBao Server TLS Certificate Generator"
+echo "========================================================================="
+echo "  Output dir: $CERT_DIR"
 echo "========================================================================="
 
-# Check if OpenBao container is running
-if ! docker ps | grep -q "$BAO_CONTAINER"; then
-    echo "❌ OpenBao container '$BAO_CONTAINER' is not running"
-    echo "   Start it with: docker-compose up -d openbao"
-    exit 1
+# CA phải tồn tại trước
+if [ ! -f "$CERT_DIR/ca-cert.pem" ] || [ ! -f "$CERT_DIR/ca-key.pem" ]; then
+  echo "❌ CA không tồn tại tại $CERT_DIR. Chạy generate-mtls-certs.sh trước."
+  exit 1
 fi
 
 mkdir -p "$CERT_DIR"
 
-echo "[1/4] Creating OpenBao server private key..."
+echo "[1/3] Tạo OpenBao server private key (4096-bit)..."
 openssl genrsa -out "$CERT_DIR/server-key.pem" 4096
 
-echo "[2/4] Creating server certificate signing request..."
-# Create config file for subject alternative names
-cat > /tmp/server.conf << EOF
+echo "[2/3] Tạo CSR với SAN cho OpenBao..."
+TMP_CONF=$(mktemp "$CERT_DIR/openbao-san.XXXXXX.conf")
+trap "rm -f $TMP_CONF" EXIT
+
+cat > "$TMP_CONF" << EOF
 [req]
 distinguished_name = req_distinguished_name
 req_extensions = v3_req
 prompt = no
 
 [req_distinguished_name]
-C = VN
-O = DRM-System
-CN = openbao.local
+C  = VN
+O  = DRM-System
+CN = openbao
 
 [v3_req]
 keyUsage = keyEncipherment, dataEncipherment
 extendedKeyUsage = serverAuth, clientAuth
-subjectAltName = DNS:localhost, DNS:openbao, DNS:drm_kms, IP:127.0.0.1
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = openbao
+DNS.2 = drm_kms
+DNS.3 = localhost
+IP.1  = 127.0.0.1
 EOF
 
-openssl req -new -key "$CERT_DIR/server-key.pem" \
-  -out "$CERT_DIR/server.csr" \
-  -config /tmp/server.conf
+openssl req -new \
+  -key "$CERT_DIR/server-key.pem" \
+  -out "$CERT_DIR/openbao.csr" \
+  -config "$TMP_CONF"
 
-echo "[3/4] Signing server certificate with CA..."
-openssl x509 -req -days $CERT_VALIDITY_DAYS \
-  -in "$CERT_DIR/server.csr" \
+echo "[3/3] Ký server certificate với CA nội bộ..."
+openssl x509 -req \
+  -days $CERT_VALIDITY_DAYS \
+  -in "$CERT_DIR/openbao.csr" \
   -CA "$CERT_DIR/ca-cert.pem" \
   -CAkey "$CERT_DIR/ca-key.pem" \
   -CAcreateserial \
   -out "$CERT_DIR/server-cert.pem" \
   -extensions v3_req \
-  -extfile /tmp/server.conf
+  -extfile "$TMP_CONF"
 
-rm /tmp/server.conf "$CERT_DIR/server.csr"
+rm -f "$CERT_DIR/openbao.csr"
 
-echo "[4/4] Copying certificates to OpenBao container..."
-
-# Create directory in container
-docker exec "$BAO_CONTAINER" mkdir -p "$BAO_CERT_DIR"
-
-# Copy certificates
-docker cp "$CERT_DIR/server-cert.pem" "$BAO_CONTAINER:$BAO_CERT_DIR/"
-docker cp "$CERT_DIR/server-key.pem" "$BAO_CONTAINER:$BAO_CERT_DIR/"
-docker cp "$CERT_DIR/ca-cert.pem" "$BAO_CONTAINER:$BAO_CERT_DIR/"
-
-# Set permissions inside container
-docker exec "$BAO_CONTAINER" chmod 400 "$BAO_CERT_DIR/server-key.pem"
-docker exec "$BAO_CONTAINER" chmod 444 "$BAO_CERT_DIR/server-cert.pem"
-docker exec "$BAO_CONTAINER" chmod 444 "$BAO_CERT_DIR/ca-cert.pem"
-
-# Set proper permissions locally
-chmod 644 "$CERT_DIR/server-key.pem"
-chmod 444 "$CERT_DIR/server-cert.pem"
+# Permissions — server-key chỉ owner đọc
+chmod 600 "$CERT_DIR/server-key.pem"
+chmod 644 "$CERT_DIR/server-cert.pem"
 
 echo ""
 echo "========================================================================="
-echo "✅ OpenBao TLS Configuration Completed!"
+echo "✅ OpenBao Server Certificate Generated!"
 echo "========================================================================="
 echo ""
-echo "Certificate Location (Local): $CERT_DIR"
-echo "Certificate Location (Container): $BAO_CERT_DIR"
+echo "  Cert dir (mount vào container qua volume):"
+echo "    $CERT_DIR/server-cert.pem  → /vault/config/certs/server-cert.pem"
+echo "    $CERT_DIR/server-key.pem   → /vault/config/certs/server-key.pem"
+echo "    $CERT_DIR/ca-cert.pem      → /vault/config/certs/ca-cert.pem (trust)"
 echo ""
-echo "Generated files:"
-echo "  - server-cert.pem  (Server Certificate)"
-echo "  - server-key.pem   (Server Private Key)"
+echo "📋 Server cert details:"
+openssl x509 -in "$CERT_DIR/server-cert.pem" -noout \
+  -subject -issuer -dates
+openssl x509 -in "$CERT_DIR/server-cert.pem" -noout -text \
+  | grep -A1 "Subject Alternative Name"
 echo ""
-echo "📋 Server Certificate Details:"
-openssl x509 -in "$CERT_DIR/server-cert.pem" -text -noout | grep -E "Subject:|Issuer:|Not Before|Not After"
+echo "─────────────────────────────────────────────────────────────────────────"
+echo "  Để bật TLS trong OpenBao, sửa security/config/bao-config.hcl:"
 echo ""
-echo "🔐 To enable TLS in OpenBao, configure:"
-echo "   - Update BAO_ADDR to use https:// instead of http://"
-echo "   - Example: export BAO_ADDR=https://localhost:8200"
+echo '  listener "tcp" {'
+echo '    address            = "0.0.0.0:8200"'
+echo '    tls_cert_file      = "/vault/config/certs/server-cert.pem"'
+echo '    tls_key_file       = "/vault/config/certs/server-key.pem"'
+echo '    tls_client_ca_file = "/vault/config/certs/ca-cert.pem"'
+echo '  }'
 echo ""
-echo "⚠️  PRODUCTION RECOMMENDATIONS:"
-echo "   1. Use HashiCorp Vault's Auto-Unseal with TLS"
-echo "   2. Implement certificate rotation before expiration"
-echo "   3. Use proper CA certificates instead of self-signed"
-echo "   4. Enable mutual TLS (mTLS) enforcement in Vault/OpenBao config"
+echo "  Sau đó cập nhật .env:"
+echo "    BAO_ADDR=https://openbao:8200"
 echo ""
+echo "  Rồi restart container (cert đã mount sẵn qua volume — không cần build lại):"
+echo "    docker compose restart openbao app"
+echo "─────────────────────────────────────────────────────────────────────────"
+echo ""
+echo "⚠️  QUAN TRỌNG — Thứ tự file trong $CERT_DIR:"
+echo ""
+echo "  File             | app mount | openbao mount | nginx mount"
+echo "  -----------------|-----------|---------------|------------"
+echo "  ca-cert.pem      | trust CA  | trust CA      | (không dùng)"
+echo "  client-cert.pem  | dùng      | verify client | (không dùng)"
+echo "  client-key.pem   | dùng      | (không dùng)  | (không dùng)"
+echo "  server-cert.pem  | (không)   | serve TLS     | (không dùng)"
+echo "  server-key.pem   | (không)   | serve TLS     | (không dùng)"
+echo "  nginx-cert.pem   | (không)   | (không dùng)  | → nginx/certs/cert.pem"
+echo "  nginx-key.pem    | (không)   | (không dùng)  | → nginx/certs/key.pem"
 echo "========================================================================="
