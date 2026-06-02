@@ -54,11 +54,18 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
       KC_PROXY: edge
+      # [THÊM dòng 57-61] Dùng MariaDB thay H2 embedded → data persist qua build
+      KC_DB: mariadb
+      KC_DB_URL: jdbc:mariadb://db:3306/keycloak
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: ${DB_ROOT_PASSWORD}
+      KC_DB_SCHEMA: keycloak
     volumes:
       - ./realm-export.json:/opt/keycloak/data/import/realm.json:ro
     command: start-dev --import-realm
     networks:
       - private-subnet
+      - db-subnet
     # healthcheck:
     #   test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
     #   interval: 15s
@@ -217,3 +224,4 @@ volumes:
   prometheus_data:
   grafana_data:
   audio_segments:
+  keycloak_data:

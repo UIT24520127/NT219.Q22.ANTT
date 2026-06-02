@@ -142,25 +142,18 @@ function PlayerInner() {
 
   // ── Auth guard ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    const token = localStorage.getItem('token');
     const returnUrl = window.location.pathname + window.location.search;
-
-    if (!token) {
-      router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-      return;
-    }
-
-    try {
-      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      const isExpired = payload.exp && payload.exp * 1000 < Date.now();
-      if (isExpired) {
-        localStorage.removeItem('token');
+ 
+    (async () => {
+      // Import từ token.ts — tự refresh nếu gần hết hạn
+      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+      const token = await getValidToken();
+ 
+      if (!token) {
+        clearTokens();
         router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
       }
-    } catch {
-      localStorage.removeItem('token');
-      router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-    }
+    })();
   }, [router]);
 
   // ── Load metadata ───────────────────────────────────────────────────────────
@@ -171,8 +164,10 @@ function PlayerInner() {
     (async () => {
       try {
         setStatusLog('🔍 Đang truy vấn metadata...');
+        const { getValidToken } = await import('@/lib/auth/token');
+        const metaToken = await getValidToken();
         const res = await fetch(`/api/ingest/upload?trackId=${id}`, {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          headers: { 'Authorization': `Bearer ${metaToken || ''}` }
         });
         if (!res.ok) throw new Error('Không tìm thấy bài hát');
         const json = await res.json();
@@ -357,16 +352,24 @@ function PlayerInner() {
 
       // ── 4. Network filter: MANIFEST + SEGMENT → proxy /api/media/proxy ───
       player.getNetworkingEngine()?.registerRequestFilter(
-        (type: number, request: any) => {
+        async (type: number, request: any) => {
           // type 5 = LICENSE → Shaka fetch data: URI, không cần proxy
           if (type === 5) return;
           if (request.uris[0]?.startsWith('data:')) return;
-
-          request.headers['Authorization'] = `Bearer ${rawToken}`;
-
+ 
+          // Luôn lấy token mới nhất — tự refresh nếu gần hết hạn
+          const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+          const freshToken = await getValidToken();
+          if (!freshToken) {
+            clearTokens();
+            router.replace('/login');
+            return;
+          }
+          request.headers['Authorization'] = `Bearer ${freshToken}`;
+ 
           const originalUrl: string = request.uris[0];
           if (originalUrl.includes('/api/media/proxy?key=')) return;
-
+ 
           const r2Key = urlToR2Key(originalUrl, trackId);
           request.uris = [getProxyUrl(r2Key)];
         }
