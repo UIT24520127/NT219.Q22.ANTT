@@ -84,16 +84,6 @@ export default function HomePage() {
             📚 Thư viện (Disabled)
           </span>
         </div>
-
-        {/* Security stack badge ở cuối sidebar */}
-        <div className="mt-auto p-3 bg-gray-950 border border-gray-900 rounded-xl text-[10px] font-mono text-gray-500 flex flex-col gap-1">
-          <span className="text-emerald-500 font-bold text-[11px] mb-1">🔐 Security Stack</span>
-          <span>✓ AES-128 CENC</span>
-          <span>✓ ECDH P-256</span>
-          <span>✓ ECDSA Signing</span>
-          <span className="text-emerald-400">✓ DPoP RFC 9449</span>
-          <span>✓ OpenBao KMS</span>
-        </div>
       </div>
 
       {/* ── Main content ── */}
@@ -133,9 +123,6 @@ export default function HomePage() {
         {/* Track grid */}
         <div className="p-6">
           <h2 className="text-2xl font-bold mb-1">Bản quyền phát hành mới</h2>
-          <p className="text-gray-400 text-xs mb-6">
-            Bảo vệ bởi CENC + ECDH + DPoP (RFC 9449) + OpenBao KMS
-          </p>
 
           {isLoading ? (
             <div className="flex items-center gap-3 text-sm text-emerald-400 font-mono">
@@ -175,10 +162,6 @@ export default function HomePage() {
 
                   <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-900 text-[10px] text-gray-500 font-mono">
                     <span>⏱️ {Math.floor(track.duration / 60)}m {track.duration % 60}s</span>
-                    {/* Badge cập nhật tuần 4 */}
-                    <span className="text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-900/30 whitespace-nowrap">
-                      DPoP+ECDH
-                    </span>
                   </div>
                 </div>
               ))}

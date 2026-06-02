@@ -388,7 +388,7 @@ function PlayerInner() {
       await videoRef.current!.play();
       setIsPlaying(true);
       setIsLoadingStream(false);
-      setStatusLog('🎵 Đang phát từ R2 — Shaka ClearKey EME');
+      setStatusLog('🎵 Đang phát từ R2');
 
     } catch (err: any) {
       setError(err.message);
@@ -427,16 +427,12 @@ function PlayerInner() {
       </button>
 
       <h1 className="text-3xl font-bold text-white mb-2">Secure Audio Player</h1>
-      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT · Shaka ClearKey EME · R2 Signed URLs</p>
+      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT</p>
 
       <div className="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-800 p-6 flex flex-col gap-5">
         <div className="flex items-center gap-4">
           <div className={`w-16 h-16 ${isPlaying ? 'bg-emerald-600 animate-pulse border-emerald-500' : 'bg-gray-800'} rounded-xl flex items-center justify-center border-2 shadow-lg`}>
             <span className="text-white text-3xl">🎵</span>
-          </div>
-          <div>
-            <p className="text-white font-bold text-base truncate max-w-[240px]">{songTitle}</p>
-            <p className="text-emerald-400 text-[11px] font-mono">● CENC + ECDH + DPoP + Shaka EME + R2</p>
           </div>
         </div>
 
