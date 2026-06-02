@@ -46,6 +46,77 @@ export const licenseProcessingDuration = histogram({
   buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5],
 });
 
+// Auth - Extended
+export const authLoginTotal = counter({
+  name: 'auth_login_total',
+  help: 'Total login attempts',
+  labelNames: ['status'],
+});
+
+export const authRegisterTotal = counter({
+  name: 'auth_register_total',
+  help: 'Total registration attempts',
+  labelNames: ['status'],
+});
+
+export const authRefreshTotal = counter({
+  name: 'auth_refresh_total',
+  help: 'Total token refresh attempts',
+  labelNames: ['status'],
+});
+
+// Upload
+export const uploadTotal = counter({
+  name: 'upload_total',
+  help: 'Total upload attempts',
+  labelNames: ['status'],
+});
+
+export const uploadFileSize = histogram({
+  name: 'upload_file_size_bytes',
+  help: 'Size of uploaded files in bytes',
+  buckets: [1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024, 50 * 1024 * 1024, 100 * 1024 * 1024],
+});
+
+export const uploadProcessingDuration = histogram({
+  name: 'upload_processing_duration_seconds',
+  help: 'Time taken to process uploaded file',
+  buckets: [1, 5, 10, 30, 60, 120, 300],
+});
+
+// User Management
+export const userCreatedTotal = counter({
+  name: 'user_created_total',
+  help: 'Total users created',
+});
+
+export const userDeletedTotal = counter({
+  name: 'user_deleted_total',
+  help: 'Total users deleted',
+});
+
+export const adminRoleGrantedTotal = counter({
+  name: 'admin_role_granted_total',
+  help: 'Total times admin role granted',
+});
+
+export const adminRoleRevokedTotal = counter({
+  name: 'admin_role_revoked_total',
+  help: 'Total times admin role revoked',
+});
+
+// Track Management
+export const trackDeletedTotal = counter({
+  name: 'track_deleted_total',
+  help: 'Total tracks deleted',
+});
+
+export const manifestGenerationDuration = histogram({
+  name: 'manifest_generation_duration_seconds',
+  help: 'Time taken to generate DASH manifest',
+  buckets: [1, 5, 10, 30, 60],
+});
+
 // Auth
 export const authAttempts = counter({
   name: 'auth_attempts_total',

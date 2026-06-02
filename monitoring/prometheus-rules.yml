@@ -48,6 +48,186 @@ groups:
           summary: "License processing errors detected"
           description: "{{ $value }} license processing errors in the last 5 minutes"
 
+      # Slow license processing
+      - alert: SlowLicenseProcessing
+        expr: |
+          histogram_quantile(0.95, rate(license_processing_duration_seconds_bucket[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          component: license
+        annotations:
+          summary: "Slow license processing times"
+          description: |
+            95th percentile processing time is {{ $value | humanizeDuration }}.
+            May impact playback experience.
+
+  - name: upload-alerts
+    interval: 30s
+    rules:
+      - alert: HighUploadFailureRate
+        expr: |
+          (
+            rate(upload_total{status="failure"}[5m]) /
+            (rate(upload_total{status="success"}[5m]) + rate(upload_total{status="failure"}[5m]) + 0.001)
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: upload
+        annotations:
+          summary: "High upload failure rate detected (>20%)"
+          description: |
+            Upload failure rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+
+      - alert: UploadFailureSpike
+        expr: |
+          increase(upload_total{status="failure"}[1m]) > 5
+        for: 2m
+        labels:
+          severity: critical
+          component: upload
+        annotations:
+          summary: "Sudden spike in upload failures"
+          description: |
+            {{ $value }} upload failures detected in the last minute.
+
+  - name: auth-alerts
+    interval: 30s
+    rules:
+      - alert: UnusualAuthErrors
+        expr: |
+          increase(auth_login_total{status="failure"}[5m]) > 10
+        for: 3m
+        labels:
+          severity: warning
+          component: auth
+        annotations:
+          summary: "Unusual number of authentication failures"
+          description: |
+            {{ $value }} login failures detected in the last 5 minutes.
+
+      - alert: RegisterFailures
+        expr: |
+          increase(auth_register_total{status="failure"}[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: auth
+        annotations:
+          summary: "Multiple registration failures"
+          description: |
+            {{ $value }} registration failures detected.
+
+  - name: api-performance-alerts
+    interval: 30s
+    rules:
+      - alert: SlowAPIResponse
+        expr: |
+          histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Slow API response times detected"
+          description: |
+            95th percentile response time is {{ $value | humanizeDuration }}.
+
+      - alert: VerySlowAPIResponse
+        expr: |
+          histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 5.0
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Very slow API responses (>5s)"
+          description: |
+            95th percentile response time is {{ $value | humanizeDuration }}.
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            rate(http_errors_total[5m]) /
+            (rate(http_request_duration_seconds_count[5m]) + 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High HTTP error rate (>5%)"
+          description: |
+            Error rate is {{ $value | humanizePercentage }}.
+
+  - name: kms-alerts
+    interval: 30s
+    rules:
+      - alert: KMSDecryptionErrors
+        expr: |
+          increase(kms_errors_total{operation="decryption"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: kms
+        annotations:
+          summary: "KMS decryption errors detected"
+          description: |
+            {{ $value }} KMS decryption errors in the last 5 minutes.
+
+      - alert: SlowKMSDecryption
+        expr: |
+          histogram_quantile(0.95, rate(kms_decryption_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          component: kms
+        annotations:
+          summary: "Slow KMS decryption times"
+          description: |
+            95th percentile decryption time is {{ $value | humanizeDuration }}.
+
+  - name: database-alerts
+    interval: 30s
+    rules:
+      - alert: DatabaseErrors
+        expr: |
+          increase(db_errors_total[5m]) > 5
+        for: 3m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Database errors detected"
+          description: |
+            {{ $value }} database errors in the last 5 minutes.
+
+      - alert: SlowDatabaseQueries
+        expr: |
+          histogram_quantile(0.95, rate(db_query_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Slow database queries detected"
+          description: |
+            95th percentile query time is {{ $value | humanizeDuration }}.
+
+      - alert: DatabaseConnectionPoolNearCapacity
+        expr: |
+          db_connection_pool_size > 90
+        for: 2m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Database connection pool near capacity"
+          description: |
+            {{ $value }} connections active in pool (threshold: 100).
+
+
       # Performance alerts
       - alert: HighLicenseProcessingTime
         expr: |

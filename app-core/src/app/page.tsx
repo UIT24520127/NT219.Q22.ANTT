@@ -2,6 +2,7 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { hasRole, getUserRoles } from '@/lib/auth/token';
 
 interface TrackItem {
   id: string;
@@ -16,12 +17,14 @@ const cardEmojis = ["🎸", "🎧", "🔥", "🎵", "🎹", "🎼", "🎺", "�
 export default function HomePage() {
   const router = useRouter();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [tracks, setTracks] = useState<TrackItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
     setIsLoggedIn(!!token);
+    setIsAdmin(hasRole('admin'));
 
     const fetchAllTracks = async () => {
       try {
@@ -77,6 +80,22 @@ export default function HomePage() {
           <span className="text-white cursor-pointer flex items-center gap-4">
             🏠 Trang chủ
           </span>
+          {isLoggedIn && (
+            <>
+              <Link href="/upload" className="hover:text-white transition-colors">
+                <span className="cursor-pointer flex items-center gap-4">
+                  📤 Upload Nhạc
+                </span>
+              </Link>
+              {isAdmin && (
+                <Link href="/admin" className="hover:text-white transition-colors">
+                  <span className="cursor-pointer flex items-center gap-4">
+                    ⚙️ Quản lý Admin
+                  </span>
+                </Link>
+              )}
+            </>
+          )}
           <span className="opacity-50 cursor-not-allowed flex items-center gap-4">
             🔍 Tìm kiếm (Disabled)
           </span>

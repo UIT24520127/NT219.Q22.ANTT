@@ -136,3 +136,19 @@ export const deactivateOldManifests = async (trackId: string): Promise<void> => 
     console.error('❌ [DB] Error deactivating manifests:', error.message);
   }
 };
+
+export const deleteTrack = async (trackId: string): Promise<void> => {
+  try {
+    // Delete manifests first (cascade delete via foreign key should handle this,
+    // but we're explicit for clarity)
+    await db.query('DELETE FROM dash_manifests WHERE track_id = ?', [trackId]);
+    console.log(`✅ [DB] Deleted manifests for track ${trackId}`);
+
+    // Delete the track itself
+    await db.query('DELETE FROM tracks WHERE id = ?', [trackId]);
+    console.log(`✅ [DB] Track deleted: ${trackId}`);
+  } catch (error: any) {
+    console.error('❌ [DB] Error deleting track:', error.message);
+    throw error;
+  }
+};

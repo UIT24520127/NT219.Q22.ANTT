@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { requireRole, getUserIdFromRequest } from '@/lib/auth/middleware';
 import {
   createTrack,
   getTrackById,
@@ -60,16 +61,21 @@ const extractAudioFile = async (request: NextRequest): Promise<{ filename: strin
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST: Upload và đóng gói bài hát mới (giữ nguyên)
+// POST: Upload và đóng gói bài hát mới (require uploader or admin role)
 // ─────────────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
   let trackId: string | null = null;
 
   try {
-    console.log('📥 [Ingest] Processing audio upload...');
-    ensureUploadDir();
+    // Check authorization - require 'uploader' or 'admin' role
+    const { error, user } = await requireRole(request, ['uploader', 'admin']);
+    if (error) return error;
 
+    const userId = user.sub;
+
+    console.log('📥 [Ingest] Processing audio upload...', { userId });
+    ensureUploadDir();
     const audioFile = await extractAudioFile(request);
     if (!audioFile) return NextResponse.json({ error: 'No valid audio file provided' }, { status: 400 });
     if (!validateAudioFile(audioFile.filename, audioFile.buffer))
@@ -85,6 +91,7 @@ export async function POST(request: NextRequest) {
 
     let packagingResult;
     try {
+      if (!trackId) throw new Error('Track ID not generated');
       packagingResult = await encryptAndPackageMedia(tempFilePath, trackId, kid, encrypted_cek);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';

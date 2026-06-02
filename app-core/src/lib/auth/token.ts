@@ -7,6 +7,9 @@ export interface JWTPayload {
     sub: string;
     email?: string;
     preferred_username?: string;
+    realm_access?: {
+      roles: string[];
+    };
     exp: number;
     iat: number;
     [key: string]: unknown;
@@ -88,4 +91,35 @@ export interface JWTPayload {
     if (!token) return null;
     if (!isTokenExpired(token)) return token;
     return refreshAccessToken();
+  }
+
+  // ── Lấy user info từ token ────────────────────────────────────────────────────
+  export function getUserInfo(): JWTPayload | null {
+    const token = getStoredToken();
+    if (!token) return null;
+    return decodeJWT(token);
+  }
+
+  // ── Lấy danh sách roles của user ──────────────────────────────────────────────
+  export function getUserRoles(): string[] {
+    const user = getUserInfo();
+    return user?.realm_access?.roles || [];
+  }
+
+  // ── Kiểm tra user có role nào không ───────────────────────────────────────────
+  export function hasRole(role: string): boolean {
+    const roles = getUserRoles();
+    return roles.includes(role);
+  }
+
+  // ── Kiểm tra user có ít nhất một trong các role ───────────────────────────────
+  export function hasAnyRole(roles: string[]): boolean {
+    const userRoles = getUserRoles();
+    return roles.some(role => userRoles.includes(role));
+  }
+
+  // ── Kiểm tra user có đủ tất cả các role ───────────────────────────────────────
+  export function hasAllRoles(roles: string[]): boolean {
+    const userRoles = getUserRoles();
+    return roles.every(role => userRoles.includes(role));
   }

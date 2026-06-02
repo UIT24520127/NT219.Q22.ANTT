@@ -7,7 +7,7 @@ services:
     image: mariadb:10.11
     container_name: drm_mariadb
     environment:
-      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_PASSWORD}
       MARIADB_DATABASE: drm_system
     volumes:
       - mariadb_data:/var/lib/mysql
@@ -183,6 +183,7 @@ services:
     container_name: drm_prometheus
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus-rules.yml:/etc/prometheus/rules/prometheus-rules.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
