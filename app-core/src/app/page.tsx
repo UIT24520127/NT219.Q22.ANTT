@@ -2,7 +2,6 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Upload } from 'lucide-react';
 
 interface TrackItem {
   id: string;
@@ -97,14 +96,6 @@ export default function HomePage() {
             <div className="w-8 h-8 rounded-full bg-black/60 flex items-center justify-center cursor-not-allowed opacity-60">{'>'}</div>
           </div>
           <div className="flex items-center gap-3">
-            {/* Upload button */}
-            <button
-              onClick={() => router.push('/upload')}
-              className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-full font-bold text-sm hover:bg-emerald-600 transition-all duration-200"
-            >
-              <Upload size={16} />
-              <span className="hidden sm:inline">Upload</span>
-            </button>
             {/* DPoP indicator — chỉ hiện khi đã đăng nhập */}
             {isLoggedIn && (
               <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-900/40 px-2.5 py-1 rounded-full">

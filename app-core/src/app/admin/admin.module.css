@@ -1,0 +1,347 @@
+.container {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  color: #e2e8f0;
+  padding: 20px;
+}
+
+.header {
+  max-width: 1400px;
+  margin: 0 auto 40px;
+  padding: 30px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.header h1 {
+  margin: 0 0 10px 0;
+  font-size: 2.5rem;
+  font-weight: bold;
+}
+
+.userInfo {
+  font-size: 0.95rem;
+  color: #cbd5e1;
+}
+
+.userInfo strong {
+  color: #60a5fa;
+}
+
+.grid {
+  max-width: 1400px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+}
+
+@media (max-width: 1024px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Upload Section */
+.uploadSection,
+.metricsSection,
+.prometheusSection {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 30px;
+  backdrop-filter: blur(10px);
+}
+
+.uploadSection h2,
+.metricsSection h2,
+.prometheusSection h2 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.uploadForm {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.uploadContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  align-items: center;
+  text-align: center;
+}
+
+.uploadContainer p {
+  color: #cbd5e1;
+  margin: 0;
+}
+
+.fileInputWrapper {
+  position: relative;
+  overflow: hidden;
+  border: 2px dashed rgba(96, 165, 250, 0.3);
+  border-radius: 8px;
+  padding: 20px;
+  transition: all 0.2s ease;
+}
+
+.fileInputWrapper:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  background: rgba(96, 165, 250, 0.05);
+}
+
+.fileInput {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.fileLabel {
+  display: block;
+  text-align: center;
+  cursor: pointer;
+  color: #cbd5e1;
+  font-size: 0.95rem;
+  transition: color 0.2s ease;
+}
+
+.fileInputWrapper:hover .fileLabel {
+  color: #60a5fa;
+}
+
+.uploadBtn {
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 1rem;
+}
+
+.uploadBtn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px rgba(59, 130, 246, 0.3);
+}
+
+.uploadBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.success {
+  padding: 15px;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 8px;
+  color: #86efac;
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+
+.error {
+  padding: 15px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: #fca5a5;
+  font-size: 0.95rem;
+}
+
+/* Metrics Section */
+.metricsContainer {
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.grafanaEmbed {
+  display: block;
+  border-radius: 8px;
+}
+
+/* Prometheus Section */
+.prometheusContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.prometheusContainer p {
+  margin: 0;
+  color: #cbd5e1;
+}
+
+.externalLink {
+  display: inline-block;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  text-align: center;
+}
+
+.externalLink:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px rgba(16, 185, 129, 0.3);
+}
+
+.loading,
+.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-size: 1.2rem;
+  text-align: center;
+}
+
+.error a {
+  margin-top: 20px;
+  padding: 12px 24px;
+  background: #3b82f6;
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.error a:hover {
+  background: #2563eb;
+}
+
+/* Track List & Audit Log Styles */
+.listSection {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 30px;
+  backdrop-filter: blur(10px);
+  grid-column: span 2;
+}
+
+@media (max-width: 1024px) {
+  .listSection {
+    grid-column: span 1;
+  }
+}
+
+.listSection h2 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.tableWrapper {
+  overflow-x: auto;
+  margin-top: 15px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.table th,
+.table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.table th {
+  background: rgba(255, 255, 255, 0.03);
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.table tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.codeCell {
+  font-family: monospace;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.terminalPanel {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 15px;
+  max-height: 350px;
+  overflow-y: auto;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.85rem;
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.8);
+}
+
+.terminalLine {
+  margin: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.terminalLineTime {
+  color: #64748b;
+  margin-right: 10px;
+}
+
+.terminalLineAction {
+  font-weight: bold;
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-right: 10px;
+  font-size: 0.75rem;
+}
+
+.actionSuccess {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
+.actionFailed {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.actionNeutral {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+
+.emptyState {
+  padding: 30px;
+  text-align: center;
+  color: #64748b;
+  font-style: italic;
+}

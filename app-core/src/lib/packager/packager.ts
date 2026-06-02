@@ -47,7 +47,7 @@ const getFFprobePath = (): string => {
   return 'ffprobe';
 };
 
-const extractMediaMetadata = async (inputPath: string) => {
+export const extractMediaMetadata = async (inputPath: string) => {
   const { stdout } = await execFileAsync(getFFprobePath(), [
     '-v', 'error',
     '-show_format', '-show_streams',

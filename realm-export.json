@@ -86,6 +86,15 @@
         "clientRole": false,
         "containerId": "1442c078-a494-4572-84fa-64767180a793",
         "attributes": {}
+      },
+      {
+        "id": "admin-role-id-12345",
+        "name": "admin",
+        "description": "Administrator role",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "1442c078-a494-4572-84fa-64767180a793",
+        "attributes": {}
       }
     ],
     "client": {
@@ -462,6 +471,35 @@
   "webAuthnPolicyPasswordlessExtraOrigins": [],
   "users": [
     {
+      "id": "admin-user-id-67890",
+      "username": "admin",
+      "email": "admin@drm-system.local",
+      "emailVerified": true,
+      "enabled": true,
+      "createdTimestamp": 1779035405755,
+      "totp": false,
+      "credentials": [
+        {
+          "id": "admin-cred-id",
+          "type": "password",
+          "createdDate": 1779035405755,
+          "credentialData": "{\"hashIterations\":27500,\"algorithm\":\"pbkdf2-sha256\",\"additionalParameters\":{}}",
+          "secretData": "{\"value\":\"MilvsOc4KCQDkn7T5lmhNFSSc471as49pgoyOoBeCF8=\",\"salt\":\"YHCSbSblyJyCvY9NxLZa3w==\"}",
+          "userLabel": null,
+          "priority": 10
+        }
+      ],
+      "disableableCredentialTypes": [],
+      "requiredActions": [],
+      "realmRoles": [
+        "default-roles-drm-realm",
+        "admin"
+      ],
+      "clientRoles": {},
+      "notBefore": 0,
+      "groups": []
+    },
+    {
       "id": "0fbe7556-fe54-4dfc-a6bf-cfb9ebe4fe00",
       "username": "service-account-backend-api",
       "emailVerified": false,
@@ -666,7 +704,7 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "ae dan ma secret tu file .env vo day",
+      "secret": "Ug4bI09gWfGp3RQE7K2eU5Ol1za9AknT",
       "redirectUris": [
         ""
       ],

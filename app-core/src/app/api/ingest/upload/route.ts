@@ -13,7 +13,9 @@ import {
   deactivateOldManifests,
   logAuditEvent,
 } from '@/lib/track-db';
-import { encryptAndPackageMedia } from '@/lib/packager/packager';
+import { encryptAndPackageMedia, extractMediaMetadata } from '@/lib/packager/packager';
+import { verifyAdminAccess, forbiddenResponse, getAdminTokenFromRequest } from '@/lib/auth/admin';
+import { verifyDPoPProof } from '@/lib/dpop/verify';
 
 const TEMP_UPLOAD_DIR = process.env.TEMP_UPLOAD_DIR || '/tmp/audio-uploads';
 
@@ -60,14 +62,71 @@ const extractAudioFile = async (request: NextRequest): Promise<{ filename: strin
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST: Upload và đóng gói bài hát mới (giữ nguyên)
+// POST: Upload và đóng gói bài hát mới - REQUIRES ADMIN ROLE
+// ─────────────────────────────────────────────────────────────────────────────
+const getIngestEndpointUrl = (request: NextRequest): string => {
+  if (process.env.APP_URL) {
+    return `${process.env.APP_URL.replace(/\/$/, '')}/api/ingest/upload`;
+  }
+  const host = request.headers.get('host') || 'localhost';
+  const proto = request.headers.get('x-forwarded-proto') || 
+                (host.startsWith('localhost') ? 'http' : 'https');
+  return `${proto}://${host}/api/ingest/upload`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST: Upload và đóng gói bài hát mới - REQUIRES ADMIN ROLE & DPoP PROOF
 // ─────────────────────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
   let trackId: string | null = null;
 
   try {
-    console.log('📥 [Ingest] Processing audio upload...');
+    // ── Verify admin access ──────────────────────────────────────────────
+    const adminVerification = await verifyAdminAccess(request);
+    if (!adminVerification.valid) {
+      console.warn(`⚠️  [Ingest] Unauthorized upload attempt: ${adminVerification.error}`);
+      return forbiddenResponse(adminVerification.error || 'Unauthorized');
+    }
+
+    const adminUsername = adminVerification.payload?.preferred_username || 'unknown';
+    const rawAccessToken = getAdminTokenFromRequest(request);
+
+    // ── Verify DPoP Proof ───────────────────────────────────────────────
+    const dpopHeader = request.headers.get('dpop');
+    if (!dpopHeader) {
+      console.error('❌ [Ingest] Thiếu DPoP header');
+      return NextResponse.json(
+        { error: 'DPoP proof required', hint: 'Thêm header DPoP: <proof_jwt>' },
+        {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'DPoP algs="ES256"' },
+        }
+      );
+    }
+
+    const ingestUrl = getIngestEndpointUrl(request);
+    const dpopResult = await verifyDPoPProof({
+      proof: dpopHeader,
+      htm: 'POST',
+      htu: ingestUrl,
+      accessToken: rawAccessToken || '',
+    });
+
+    if (!dpopResult.valid) {
+      console.error(`❌ [Ingest] DPoP verify thất bại: ${dpopResult.error}`);
+      await logAuditEvent('INGEST_FAILED', undefined, undefined, adminUsername, `DPoP: ${dpopResult.error}`);
+      return NextResponse.json(
+        { error: 'DPoP verification failed', detail: dpopResult.error },
+        {
+          status: 401,
+          headers: { 'WWW-Authenticate': 'DPoP algs="ES256" error="invalid_dpop_proof"' },
+        }
+      );
+    }
+
+    console.log('✅ [Ingest] DPoP proof hợp lệ.');
+    console.log(`📥 [Ingest] Processing audio upload by admin: ${adminUsername}...`);
     ensureUploadDir();
 
     const audioFile = await extractAudioFile(request);
@@ -77,6 +136,35 @@ export async function POST(request: NextRequest) {
 
     tempFilePath = path.join(TEMP_UPLOAD_DIR, `${uuidv4()}${path.extname(audioFile.filename)}`);
     writeFileSync(tempFilePath, audioFile.buffer);
+
+    // ── Thorough MP4/AAC Container Validation using ffprobe ─────────────
+    let mediaInfo;
+    try {
+      mediaInfo = await extractMediaMetadata(tempFilePath);
+    } catch (e: any) {
+      console.error('❌ [Ingest] FFprobe parse error:', e.message);
+      if (tempFilePath) { try { unlinkSync(tempFilePath); } catch {} }
+      return NextResponse.json({ error: 'Failed to parse media container. File might be corrupted.' }, { status: 400 });
+    }
+
+    const hasAudio = mediaInfo.streams?.some((s: any) => s.codec_type === 'audio');
+    const hasVideo = mediaInfo.streams?.some(
+      (s: any) => s.codec_type === 'video' && s.codec_name !== 'png' && s.codec_name !== 'jpeg' && s.codec_name !== 'mjpeg'
+    );
+
+    if (!hasAudio) {
+      console.error('❌ [Ingest] No audio stream found');
+      await logAuditEvent('PACKAGE_FAILED', undefined, undefined, adminUsername, `No audio stream: ${audioFile.filename}`);
+      if (tempFilePath) { try { unlinkSync(tempFilePath); } catch {} }
+      return NextResponse.json({ error: 'Invalid media: File must contain at least one audio stream.' }, { status: 400 });
+    }
+
+    if (hasVideo) {
+      console.error('❌ [Ingest] Video stream found in audio upload');
+      await logAuditEvent('PACKAGE_FAILED', undefined, undefined, adminUsername, `Video stream detected: ${audioFile.filename}`);
+      if (tempFilePath) { try { unlinkSync(tempFilePath); } catch {} }
+      return NextResponse.json({ error: 'Invalid media: Video streams are not allowed in audio uploads.' }, { status: 400 });
+    }
 
     const sourceFormat = path.extname(audioFile.filename).slice(1).toUpperCase();
     const trackData = await createTrack(audioFile.filename, sourceFormat);
@@ -88,7 +176,7 @@ export async function POST(request: NextRequest) {
       packagingResult = await encryptAndPackageMedia(tempFilePath, trackId, kid, encrypted_cek);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      await logAuditEvent('PACKAGE_FAILED', trackId, kid, 'SYSTEM', audioFile.filename);
+      await logAuditEvent('PACKAGE_FAILED', trackId, kid, adminUsername, audioFile.filename);
       throw new Error(`Packaging failed: ${message}`);
     }
 
@@ -99,7 +187,7 @@ export async function POST(request: NextRequest) {
     await deactivateOldManifests(trackId);
     await saveDASHManifest(trackId, packagingResult.mpdPath);
 
-    try { await logAuditEvent('PACKAGE_CREATED', trackId, kid, 'SYSTEM', audioFile.filename); }
+    try { await logAuditEvent('PACKAGE_CREATED', trackId, kid, adminUsername, audioFile.filename); }
     catch { /* non-critical */ }
 
     try { unlinkSync(tempFilePath); } catch { }

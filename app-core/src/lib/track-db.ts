@@ -128,6 +128,19 @@ export const logAuditEvent = async (
   }
 };
 
+export const getAuditLogs = async (limit: number = 50): Promise<AuditLog[]> => {
+  try {
+    const [rows]: any = await db.query(
+      'SELECT id, action, track_id, kid, user_id, target_file, created_at FROM audit_logs ORDER BY created_at DESC LIMIT ?',
+      [limit]
+    );
+    return rows as AuditLog[];
+  } catch (error: any) {
+    console.error('❌ [DB] Error fetching audit logs:', error.message);
+    throw error;
+  }
+};
+
 export const deactivateOldManifests = async (trackId: string): Promise<void> => {
   try {
     await db.query('UPDATE dash_manifests SET is_active = 0 WHERE track_id = ? AND is_active = 1', [trackId]);
