@@ -13,6 +13,7 @@ import {
   deactivateOldManifests,
   logAuditEvent,
 } from '@/lib/track-db';
+import { verifyDPoPProof } from '@/lib/dpop/verify';
 import { encryptAndPackageMedia } from '@/lib/packager/packager';
 
 const TEMP_UPLOAD_DIR = process.env.TEMP_UPLOAD_DIR || '/tmp/audio-uploads';
@@ -69,6 +70,52 @@ export async function POST(request: NextRequest) {
   try {
     console.log('📥 [Ingest] Processing audio upload...');
     ensureUploadDir();
+
+    // ── Auth: require Bearer token (basic expiry check) ─────────────────
+    const authHeader = request.headers.get('authorization') || '';
+    if (!authHeader.toLowerCase().startsWith('bearer ')) {
+      console.warn('❌ [Ingest] Missing Bearer token');
+      return NextResponse.json({ error: 'Unauthorized: Missing Bearer token' }, { status: 401 });
+    }
+    const rawToken = authHeader.slice('bearer '.length).trim();
+    try {
+      const payload = JSON.parse(Buffer.from(rawToken.split('.')[1], 'base64url').toString());
+      if (payload.exp && payload.exp * 1000 < Date.now()) {
+        console.warn('❌ [Ingest] Token expired');
+        return NextResponse.json({ error: 'Unauthorized: Token expired' }, { status: 401 });
+      }
+    } catch (e) {
+      console.warn('❌ [Ingest] Invalid token');
+      return NextResponse.json({ error: 'Unauthorized: Invalid token' }, { status: 401 });
+    }
+
+      // ── DPoP proof required ─────────────────────────────────────────────
+      const dpopHeader = request.headers.get('dpop');
+      if (!dpopHeader) {
+        console.warn('❌ [Ingest] Missing DPoP header');
+        return NextResponse.json(
+          { error: 'DPoP proof required', hint: 'Add DPoP header' },
+          { status: 401, headers: { 'WWW-Authenticate': 'DPoP algs="ES256"' } }
+        );
+      }
+
+      // Build upload endpoint URL similar to license endpoint helper
+      const getUploadEndpointUrl = (req: NextRequest): string => {
+        if (process.env.APP_URL) return `${process.env.APP_URL.replace(/\/$/, '')}/api/ingest/upload`;
+        const host = req.headers.get('host') || 'localhost';
+        const proto = req.headers.get('x-forwarded-proto') || (host.startsWith('localhost') ? 'http' : 'https');
+        return `${proto}://${host}/api/ingest/upload`;
+      };
+
+      const uploadUrl = getUploadEndpointUrl(request);
+      const dpopResult = await verifyDPoPProof({ proof: dpopHeader, htm: 'POST', htu: uploadUrl, accessToken: rawToken });
+      if (!dpopResult.valid) {
+        console.warn('❌ [Ingest] DPoP verify failed:', dpopResult.error);
+        return NextResponse.json(
+          { error: 'DPoP verification failed', detail: dpopResult.error },
+          { status: 401, headers: { 'WWW-Authenticate': 'DPoP algs="ES256" error="invalid_dpop_proof"' } }
+        );
+      }
 
     const audioFile = await extractAudioFile(request);
     if (!audioFile) return NextResponse.json({ error: 'No valid audio file provided' }, { status: 400 });
@@ -180,4 +227,14 @@ export async function GET(request: NextRequest) {
     console.error('❌ [Ingest] Error in GET:', message);
     return NextResponse.json({ error: 'Failed to retrieve track info' }, { status: 500 });
   }
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    },
+  });
 }

@@ -16,6 +16,41 @@ interface UploadedTrack {
 
 const ALLOWED_EXTENSIONS = ['.m4a', '.aac', '.mp4'];
 
+// DPoP keypair kept for the lifetime of the tab
+let globalDPoPKeyPair: CryptoKeyPair | null = null;
+let globalDPoPPublicJWK: JsonWebKey | null = null;
+
+function base64urlEncode(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let binary = '';
+  bytes.forEach(b => (binary += String.fromCharCode(b)));
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+async function createDPoPProof(htm: string, htu: string, accessToken: string): Promise<string> {
+  if (!globalDPoPKeyPair || !globalDPoPPublicJWK) throw new Error('DPoP keypair chưa khởi tạo');
+  const ath = base64urlEncode(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(accessToken))
+  );
+  const header = { alg: 'ES256', typ: 'dpop+jwt', jwk: globalDPoPPublicJWK };
+  const payload: any = {
+    jti: crypto.randomUUID(),
+    htm: htm.toUpperCase(),
+    htu: htu.replace(/\/$/, ''),
+    iat: Math.floor(Date.now() / 1000),
+    ath,
+  };
+  const sigInput =
+    `${base64urlEncode(new TextEncoder().encode(JSON.stringify(header)))}` +
+    `.${base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)))}`;
+  const sig = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    globalDPoPKeyPair.privateKey,
+    new TextEncoder().encode(sigInput)
+  );
+  return `${sigInput}.${base64urlEncode(sig)}`;
+}
+
 export default function UploadPage() {
   const router = useRouter();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -29,12 +64,25 @@ export default function UploadPage() {
 
   // Auth guard
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      router.replace('/login?returnTo=/upload');
-      return;
-    }
-    setIsLoggedIn(true);
+    const returnUrl = '/upload';
+    (async () => {
+      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+      const token = await getValidToken();
+      if (!token) {
+        clearTokens();
+        router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
+        return;
+      }
+      // ensure DPoP keypair exists for this tab
+      if (!globalDPoPKeyPair) {
+        globalDPoPKeyPair = await crypto.subtle.generateKey(
+          { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
+        );
+        globalDPoPPublicJWK = await crypto.subtle.exportKey('jwk', globalDPoPKeyPair.publicKey);
+        if (globalDPoPPublicJWK && 'd' in globalDPoPPublicJWK) delete (globalDPoPPublicJWK as any).d;
+      }
+      setIsLoggedIn(true);
+    })();
   }, [router]);
 
   const validateFile = (file: File): string | null => {
@@ -147,7 +195,28 @@ export default function UploadPage() {
         setIsUploading(false);
       });
 
+      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+      const uploadUrl = `${window.location.origin}/api/ingest/upload`;
+      const token = await getValidToken();
+      if (!token) {
+        clearTokens();
+        router.replace('/login?returnTo=/upload');
+        return;
+      }
+
+      // create DPoP proof bound to this tab and the upload endpoint
+      let dpopProof: string | null = null;
+      try {
+        dpopProof = await createDPoPProof('POST', uploadUrl, token);
+      } catch (e) {
+        console.warn('DPoP creation failed, proceeding without DPoP:', e);
+      }
+
       xhr.open('POST', '/api/ingest/upload');
+      try { xhr.setRequestHeader('Authorization', `Bearer ${token}`); } catch {}
+      if (dpopProof) {
+        try { xhr.setRequestHeader('DPoP', dpopProof); } catch {}
+      }
       xhr.send(formData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
