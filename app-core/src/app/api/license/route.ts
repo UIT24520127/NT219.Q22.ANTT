@@ -3,7 +3,6 @@ import { kmsService } from '@/lib/kms/bao';
 import { getEncryptedCEKByKID, logAuditEvent } from '@/lib/track-db';
 import { wrapCekWithECDH } from '@/lib/crypto/ecdh';
 import { verifyDPoPProof } from '@/lib/dpop/verify';
-import crypto from 'crypto';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 import {
@@ -204,30 +203,17 @@ export async function POST(request: Request) {
     };
     const licensePayloadBuffer = Buffer.from(JSON.stringify(licensePayload));
 
-    // ── Bước 9: Ký số ECDSA ──────────────────────────────────────────────
-    const { privateKey } = crypto.generateKeyPairSync('ec' as any, {
-      namedCurve: 'prime256v1',
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    });
-    const signer = crypto.createSign('SHA-256');
-    signer.update(licensePayloadBuffer);
-    const signatureBuffer = signer.sign({ key: privateKey, dsaEncoding: 'ieee-p1363' });
-
-    // ── Bước 10: Đóng gói binary [4-byte len][payload][sig] ──────────────
-    const finalLicenseBuffer = Buffer.alloc(4 + licensePayloadBuffer.length + signatureBuffer.length);
-    finalLicenseBuffer.writeUInt32BE(licensePayloadBuffer.length, 0);
-    licensePayloadBuffer.copy(finalLicenseBuffer, 4);
-    signatureBuffer.copy(finalLicenseBuffer, 4 + licensePayloadBuffer.length);
-
-    console.log(`📦 [License] Hoàn tất! Size: ${finalLicenseBuffer.length} bytes`);
+    // ── Bước 9: Trả về JSON (không ký ECDSA ephemeral — key bị bỏ ngay,
+    //    client không verify được; bảo mật đã đảm bảo bởi DPoP + ECDH + TLS) ──
+    console.log(`📦 [License] Hoàn tất cho KID: ${kid}`);
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, 'SYSTEM', 'license');
 
     licenseIssued.inc({ kid });
     timer({ kid });
 
-    return new NextResponse(finalLicenseBuffer, {
+    return NextResponse.json(licensePayload, {
       headers: {
-        'Content-Type': 'application/octet-stream',
+        'Cache-Control': 'no-store',
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers':

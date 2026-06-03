@@ -259,11 +259,8 @@ function PlayerInner() {
         throw new Error(`License API lỗi ${licenseRes.status}: ${errText}`);
       }
 
-      const responseBuf = new Uint8Array(await licenseRes.arrayBuffer());
-      const payloadLen = new DataView(responseBuf.buffer).getUint32(0, false);
-      const licenseData = JSON.parse(
-        new TextDecoder().decode(responseBuf.slice(4, 4 + payloadLen))
-      );
+      // License server trả JSON trực tiếp (không còn binary wrapper)
+      const licenseData = await licenseRes.json();
 
       // ── 2. X25519 unwrap CEK ──────────────────────────────────────────────
       setStatusLog('🔓 Đang giải mã CEK qua X25519...');
