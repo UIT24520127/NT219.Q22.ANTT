@@ -2,7 +2,7 @@
   "id": "1442c078-a494-4572-84fa-64767180a793",
   "realm": "drm-realm",
   "notBefore": 0,
-  "defaultSignatureAlgorithm": "RS256",
+  "defaultSignatureAlgorithm": "ES256",
   "revokeRefreshToken": false,
   "refreshTokenMaxReuse": 0,
   "accessTokenLifespan": 300,
@@ -666,7 +666,7 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "ae dan ma secret tu file .env vo day",
+      "secret": "Ug4bI09gWfGp3RQE7K2eU5Ol1za9AknT",
       "redirectUris": [
         ""
       ],
@@ -693,7 +693,10 @@
         "post.logout.redirect.uris": "+",
         "oauth2.device.authorization.grant.enabled": "false",
         "backchannel.logout.revoke.offline.tokens": "false",
-        "dpop.bound.access.tokens": "true"
+        "dpop.bound.access.tokens": "true",
+        "access.token.signed.response.alg": "ES256",
+        "id.token.signed.response.alg": "ES256",
+        "token.endpoint.auth.signing.alg": "ES256"
       },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": true,
@@ -796,7 +799,10 @@
         "post.logout.redirect.uris": "+",
         "oauth2.device.authorization.grant.enabled": "false",
         "backchannel.logout.revoke.offline.tokens": "false",
-        "dpop.bound.access.tokens": "true"
+        "dpop.bound.access.tokens": "true",
+        "access.token.signed.response.alg": "ES256",
+        "id.token.signed.response.alg": "ES256",
+        "token.endpoint.auth.signing.alg": "ES256"
       },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": true,
@@ -1779,17 +1785,6 @@
     ],
     "org.keycloak.keys.KeyProvider": [
       {
-        "id": "a17b00cb-172c-4e2d-80a9-abf7952814b3",
-        "name": "rsa-generated",
-        "providerId": "rsa-generated",
-        "subComponents": {},
-        "config": {
-          "priority": [
-            "100"
-          ]
-        }
-      },
-      {
         "id": "30c28745-b965-40b4-8a9f-0ea24d815238",
         "name": "hmac-generated-hs512",
         "providerId": "hmac-generated",
@@ -1825,6 +1820,23 @@
           ],
           "algorithm": [
             "RSA-OAEP"
+          ]
+        }
+      },
+      {
+        "id": "98da88e4-76d0-4e00-99ba-d456ae9a939d",
+        "name": "ec-p256-generated",
+        "providerId": "ecdsa-generated",
+        "subComponents": {},
+        "config": {
+          "priority": [
+            "200"
+          ],
+          "ellipticCurveKey": [
+            "P-256"
+          ],
+          "algorithm": [
+            "ES256"
           ]
         }
       }
@@ -2673,7 +2685,8 @@
     "oauth2DeviceCodeLifespan": "600",
     "parRequestUriLifespan": "60",
     "clientSessionMaxLifespan": "0",
-    "scimApiEnabled": "false"
+    "scimApiEnabled": "false",
+    "defaultSignatureAlgorithm": "ES256"
   },
   "keycloakVersion": "26.6.1",
   "userManagedAccessAllowed": false,

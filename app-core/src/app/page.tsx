@@ -2,6 +2,7 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { Upload } from 'lucide-react';
 
 interface TrackItem {
   id: string;
@@ -84,16 +85,6 @@ export default function HomePage() {
             📚 Thư viện (Disabled)
           </span>
         </div>
-
-        {/* Security stack badge ở cuối sidebar */}
-        <div className="mt-auto p-3 bg-gray-950 border border-gray-900 rounded-xl text-[10px] font-mono text-gray-500 flex flex-col gap-1">
-          <span className="text-emerald-500 font-bold text-[11px] mb-1">🔐 Security Stack</span>
-          <span>✓ AES-128 CENC</span>
-          <span>✓ ECDH P-256</span>
-          <span>✓ ECDSA Signing</span>
-          <span className="text-emerald-400">✓ DPoP RFC 9449</span>
-          <span>✓ OpenBao KMS</span>
-        </div>
       </div>
 
       {/* ── Main content ── */}
@@ -106,6 +97,14 @@ export default function HomePage() {
             <div className="w-8 h-8 rounded-full bg-black/60 flex items-center justify-center cursor-not-allowed opacity-60">{'>'}</div>
           </div>
           <div className="flex items-center gap-3">
+            {/* Upload button */}
+            <button
+              onClick={() => router.push('/upload')}
+              className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-full font-bold text-sm hover:bg-emerald-600 transition-all duration-200"
+            >
+              <Upload size={16} />
+              <span className="hidden sm:inline">Upload</span>
+            </button>
             {/* DPoP indicator — chỉ hiện khi đã đăng nhập */}
             {isLoggedIn && (
               <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-900/40 px-2.5 py-1 rounded-full">
@@ -133,9 +132,6 @@ export default function HomePage() {
         {/* Track grid */}
         <div className="p-6">
           <h2 className="text-2xl font-bold mb-1">Bản quyền phát hành mới</h2>
-          <p className="text-gray-400 text-xs mb-6">
-            Bảo vệ bởi CENC + ECDH + DPoP (RFC 9449) + OpenBao KMS
-          </p>
 
           {isLoading ? (
             <div className="flex items-center gap-3 text-sm text-emerald-400 font-mono">
@@ -175,10 +171,6 @@ export default function HomePage() {
 
                   <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-900 text-[10px] text-gray-500 font-mono">
                     <span>⏱️ {Math.floor(track.duration / 60)}m {track.duration % 60}s</span>
-                    {/* Badge cập nhật tuần 4 */}
-                    <span className="text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-900/30 whitespace-nowrap">
-                      DPoP+ECDH
-                    </span>
                   </div>
                 </div>
               ))}

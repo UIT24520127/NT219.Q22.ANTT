@@ -142,25 +142,18 @@ function PlayerInner() {
 
   // ── Auth guard ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    const token = localStorage.getItem('token');
     const returnUrl = window.location.pathname + window.location.search;
-
-    if (!token) {
-      router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-      return;
-    }
-
-    try {
-      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      const isExpired = payload.exp && payload.exp * 1000 < Date.now();
-      if (isExpired) {
-        localStorage.removeItem('token');
+ 
+    (async () => {
+      // Import từ token.ts — tự refresh nếu gần hết hạn
+      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+      const token = await getValidToken();
+ 
+      if (!token) {
+        clearTokens();
         router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
       }
-    } catch {
-      localStorage.removeItem('token');
-      router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-    }
+    })();
   }, [router]);
 
   // ── Load metadata ───────────────────────────────────────────────────────────
@@ -171,8 +164,10 @@ function PlayerInner() {
     (async () => {
       try {
         setStatusLog('🔍 Đang truy vấn metadata...');
+        const { getValidToken } = await import('@/lib/auth/token');
+        const metaToken = await getValidToken();
         const res = await fetch(`/api/ingest/upload?trackId=${id}`, {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          headers: { 'Authorization': `Bearer ${metaToken || ''}` }
         });
         if (!res.ok) throw new Error('Không tìm thấy bài hát');
         const json = await res.json();
@@ -357,16 +352,24 @@ function PlayerInner() {
 
       // ── 4. Network filter: MANIFEST + SEGMENT → proxy /api/media/proxy ───
       player.getNetworkingEngine()?.registerRequestFilter(
-        (type: number, request: any) => {
+        async (type: number, request: any) => {
           // type 5 = LICENSE → Shaka fetch data: URI, không cần proxy
           if (type === 5) return;
           if (request.uris[0]?.startsWith('data:')) return;
-
-          request.headers['Authorization'] = `Bearer ${rawToken}`;
-
+ 
+          // Luôn lấy token mới nhất — tự refresh nếu gần hết hạn
+          const { getValidToken, clearTokens } = await import('@/lib/auth/token');
+          const freshToken = await getValidToken();
+          if (!freshToken) {
+            clearTokens();
+            router.replace('/login');
+            return;
+          }
+          request.headers['Authorization'] = `Bearer ${freshToken}`;
+ 
           const originalUrl: string = request.uris[0];
           if (originalUrl.includes('/api/media/proxy?key=')) return;
-
+ 
           const r2Key = urlToR2Key(originalUrl, trackId);
           request.uris = [getProxyUrl(r2Key)];
         }
@@ -385,7 +388,7 @@ function PlayerInner() {
       await videoRef.current!.play();
       setIsPlaying(true);
       setIsLoadingStream(false);
-      setStatusLog('🎵 Đang phát từ R2 — Shaka ClearKey EME');
+      setStatusLog('🎵 Đang phát từ R2');
 
     } catch (err: any) {
       setError(err.message);
@@ -424,16 +427,12 @@ function PlayerInner() {
       </button>
 
       <h1 className="text-3xl font-bold text-white mb-2">Secure Audio Player</h1>
-      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT · Shaka ClearKey EME · R2 Signed URLs</p>
+      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT</p>
 
       <div className="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-800 p-6 flex flex-col gap-5">
         <div className="flex items-center gap-4">
           <div className={`w-16 h-16 ${isPlaying ? 'bg-emerald-600 animate-pulse border-emerald-500' : 'bg-gray-800'} rounded-xl flex items-center justify-center border-2 shadow-lg`}>
             <span className="text-white text-3xl">🎵</span>
-          </div>
-          <div>
-            <p className="text-white font-bold text-base truncate max-w-[240px]">{songTitle}</p>
-            <p className="text-emerald-400 text-[11px] font-mono">● CENC + ECDH + DPoP + Shaka EME + R2</p>
           </div>
         </div>
 

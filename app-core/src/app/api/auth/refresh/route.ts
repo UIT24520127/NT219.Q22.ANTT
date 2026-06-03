@@ -5,6 +5,7 @@
 // Keycloak trả về access_token + refresh_token mới.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import * as jose from 'jose';
 import { NextResponse } from 'next/server';
 
 export async function POST(req: Request) {
@@ -19,6 +20,24 @@ export async function POST(req: Request) {
     const issuerUrl = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
     const tokenEndpoint = `${issuerUrl}/protocol/openid-connect/token`;
 
+    // ── Tạo DPoP proof (giống login/route.ts) ──────────────────────────────
+    const raw = process.env.KEYCLOAK_DPOP_PRIVATE_JWK!;
+    const privateJwk = JSON.parse(raw);
+    const { d, ...rest } = privateJwk;
+    const publicJwk = { ...rest, alg: 'ES256', use: 'sig' };
+    const privateKey = await jose.importJWK(privateJwk, 'ES256');
+
+    const dpopProof = await new jose.SignJWT({
+      jti: crypto.randomUUID(),
+      htm: 'POST',
+      htu: tokenEndpoint,
+      // Refresh không có ath vì chưa có access token mới
+    })
+      .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk: publicJwk })
+      .setIssuedAt()
+      .setExpirationTime('2m')
+      .sign(privateKey);
+
     const params = new URLSearchParams();
     params.append('grant_type', 'refresh_token');
     params.append('client_id', process.env.KEYCLOAK_FRONTEND_CLIENT_ID || 'frontend-client');
@@ -29,7 +48,10 @@ export async function POST(req: Request) {
 
     const res = await fetch(tokenEndpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'DPoP': dpopProof,           // ← thêm vào đây
+      },
       body: params,
     });
 

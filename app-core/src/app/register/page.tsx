@@ -82,7 +82,6 @@ function RegisterInner() {
             <ShieldCheck className="w-9 h-9 text-blue-400" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Tạo tài khoản</h1>
-          <p className="text-gray-400 text-sm mt-1">DRM Streaming Platform · NT219</p>
         </div>
 
         {/* Error banner */}
@@ -201,13 +200,6 @@ function RegisterInner() {
             Đăng nhập ngay
           </button>
         </p>
-
-        {/* Security badge */}
-        <div className="mt-6 pt-4 border-t border-gray-700 flex items-center justify-center gap-1.5
-                        text-[10px] font-mono text-gray-600">
-          <span className="w-1.5 h-1.5 rounded-full bg-blue-600 inline-block" />
-          DPoP RFC 9449 · Keycloak OAuth2 · mTLS
-        </div>
       </div>
     </div>
   );

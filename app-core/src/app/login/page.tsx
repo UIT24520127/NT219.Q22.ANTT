@@ -70,7 +70,7 @@ function LoginInner() {
             <ShieldCheck className="w-9 h-9 text-emerald-500" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Secure Player</h1>
-          <p className="text-gray-400 text-sm mt-1">Hệ thống DRM Streaming · NT219</p>
+          <p className="text-gray-400 text-sm mt-1">UITify</p>
         </div>
 
         {/* Error banner */}
@@ -146,7 +146,7 @@ function LoginInner() {
         <div className="mt-6 pt-4 border-t border-gray-700 flex items-center justify-center gap-1.5
                         text-[10px] font-mono text-gray-600">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block" />
-          DPoP RFC 9449 · ECDH · OpenBao KMS
+          DPoP · ECDH · OpenBao KMS
         </div>
       </div>
     </div>

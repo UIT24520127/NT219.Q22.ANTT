@@ -47,6 +47,8 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: drm_auth
+    ports:
+      - "8080:8080"
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
@@ -54,11 +56,17 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
       KC_PROXY: edge
+      KC_DB: mariadb
+      KC_DB_URL: jdbc:mariadb://db:3306/keycloak
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: ${DB_ROOT_PASSWORD}
+      KC_DB_SCHEMA: keycloak
     volumes:
       - ./realm-export.json:/opt/keycloak/data/import/realm.json:ro
     command: start-dev --import-realm
     networks:
       - private-subnet
+      - db-subnet
     # healthcheck:
     #   test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
     #   interval: 15s
@@ -66,17 +74,7 @@ services:
     #   retries: 10
     #   start_period: 90s
 
-  # 4. OPA
-  opa:
-    image: openpolicyagent/opa:latest
-    container_name: drm_opa
-    volumes:
-      - ./policies:/policies:ro
-    command: "run --server /policies"
-    networks:
-      - private-subnet
-
-  # 5. Next.js App
+  # 4. Next.js App
   app:
     build:
       context: ./app-core
@@ -147,7 +145,7 @@ services:
       retries: 3
       start_period: 40s
 
-  # 6. Nginx — cổng duy nhất ra internet
+  # 5. Nginx — cổng duy nhất ra internet
   nginx:
     image: nginx:latest
     container_name: drm_nginx
@@ -156,8 +154,8 @@ services:
       - "443:443"
     volumes:
       - ./security/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./security/nginx/certs/cert.pem:/etc/nginx/ssl/cert.pem:ro
-      - ./security/nginx/certs/key.pem:/etc/nginx/ssl/key.pem:ro
+      - /etc/nginx/ssl/cert.pem:/etc/nginx/ssl/cert.pem:ro
+      - /etc/nginx/ssl/key.pem:/etc/nginx/ssl/key.pem:ro
     depends_on:
       app:
         condition: service_healthy
@@ -170,10 +168,12 @@ services:
       timeout: 10s
       retries: 3
 
-  # 7. Prometheus
+  # 6. Prometheus
   prometheus:
     image: prom/prometheus:latest
     container_name: drm_prometheus
+    ports:
+      - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -186,15 +186,17 @@ services:
     networks:
       - private-subnet
 
-  # 8. Grafana
+  # 7. Grafana
   grafana:
     image: grafana/grafana:latest
     container_name: drm_grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_INSTALL_PLUGINS: grafana-clock-panel
-      GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/"
+      #GF_SERVER_ROOT_URL: "http://${DOMAIN}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    ports:
+      - "3001:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -217,3 +219,4 @@ volumes:
   prometheus_data:
   grafana_data:
   audio_segments:
+  keycloak_data:
