@@ -27,7 +27,9 @@ secure-player-root/                     # Thư mục gốc dự án trên GitHub
 │
 ├── security/                           # ZONE 3: SECURITY ZONE
 │   ├── openbao/                        # Cấu hình OpenBao KMS (Auto-unseal qua OCI KMS)
-│   └── watermark/                      # Script nhúng dấu vết sóng âm A/B Switching
+│   ├── watermark/                      # Script nhúng dấu vết sóng âm A/B Switching
+│   │   └── watermark.sh                # Watermark helper used by app-core packaging
+│   │   └── README.md                   # Watermark runtime and env docs
 │   └── opa/
 		└── policies/
 │

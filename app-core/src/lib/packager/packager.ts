@@ -1,9 +1,10 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import path from 'path';
 import { kmsService } from '../kms/bao';
 import { r2Service } from '../storage/r2';
+import { applyAudioWatermark } from '../watermark';
 import type { PackagingResult } from '../types';
 
 const execFileAsync = promisify(execFile);
@@ -79,12 +80,18 @@ export const encryptAndPackageMedia = async (
   // Giải mã CEK trước khi gọi Shaka — fail sớm nếu KMS lỗi
   const plaintextCek = await decryptCEKForPackaging(encryptedCek);
 
+  const watermarkedInputPath = path.join(
+    path.dirname(inputPath),
+    `${path.basename(inputPath, path.extname(inputPath))}.watermarked${path.extname(inputPath)}`,
+  );
+  const packagingInputPath = await applyAudioWatermark(inputPath, watermarkedInputPath);
+
   const initSegmentPath = path.join(outputDir, 'init.mp4');
   const segmentTemplate = path.join(outputDir, 'segment_$Number$.m4s');
   const mpdPath         = path.join(outputDir, 'manifest.mpd');
 
   const packagerArgs = [
-    `input=${inputPath},stream=audio,init_segment=${initSegmentPath},segment_template=${segmentTemplate},drm_label=audio`,
+    `input=${packagingInputPath},stream=audio,init_segment=${initSegmentPath},segment_template=${segmentTemplate},drm_label=audio`,
     '--enable_raw_key_encryption',
     '--keys',              `label=audio:key_id=${kid}:key=${plaintextCek}`,
     '--protection_systems', 'Common',   // ClearKey — không cần Widevine CDM
@@ -117,6 +124,10 @@ export const encryptAndPackageMedia = async (
 
   if (!existsSync(mpdPath)) {
     throw new Error(`[Packager] MPD không được tạo tại ${mpdPath}`);
+  }
+
+  if (packagingInputPath !== inputPath && existsSync(packagingInputPath)) {
+    try { unlinkSync(packagingInputPath); } catch { }
   }
 
   // Lưu metadata nội bộ
