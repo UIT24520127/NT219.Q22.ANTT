@@ -1,502 +1,968 @@
 "use client";
-import React, { useEffect, useRef, useState, Suspense } from 'react';
+// app/player/page.tsx
+// Middleware đã chặn nếu không có role music_listener → chỉ listener vào được
+
 import { useRouter, useSearchParams } from 'next/navigation';
+import { useEffect, useState, useRef, useCallback, Suspense } from 'react';
+import {
+  Play, Pause, SkipBack, SkipForward,
+  Volume2, VolumeX, Music2, ShieldCheck,
+  ChevronDown, ChevronUp, Lock, Key, Fingerprint, RefreshCw,
+} from 'lucide-react';
+import { getCurrentUser, getRoleFromPayload, logout, refreshAccessToken, type JWTPayload } from '@/lib/auth/token';
 
-/**
- * Secure Audio Player — NT219 Cryptography Project, UIT
- *
- * Luồng bảo mật:
- *  1. Auth guard   — JWT token từ localStorage, kiểm tra exp trước khi render
- *  2. DPoP proof   — ECDSA P-256, ràng buộc token với keypair của tab hiện tại
- *  3. ECDH X25519  — Client tạo ephemeral keypair, gửi public key lên server
- *  4. License API  — Server trả về CEK đã wrap bằng ECDH shared secret + HKDF + AES-GCM
- *  5. CEK unwrap   — Client decrypt CEK từ wrappedCek (AES-256-GCM)
- *  6. Shaka EME    — ClearKey DRM, inject key qua clearKeys config + response filter
- *  7. Media proxy  — Mọi request DASH (MPD + segment) đi qua /api/media/proxy
- *                    Server-side fetch R2 với signed URL → browser không bao giờ thấy R2 domain
- *
- * Tại sao dùng cả clearKeys config + response filter (bước 6)?
- *  - clearKeys config: Shaka v4+ cần biết key trước khi tạo EME session
- *  - response filter: override license JSON Shaka tự build từ pssh trong MPD
- *  - KID được cung cấp ở 3 format (hex, UUID, base64url) vì Shaka các version
- *    handle format khác nhau; Shaka v5.x dùng base64url theo W3C ClearKey spec
- *
- * R2 bucket structure:
- *  audio/{trackId}/manifest.mpd
- *  audio/{trackId}/init.mp4
- *  audio/{trackId}/segment_N.m4s
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Global keypairs (tồn tại suốt lifecycle tab) ──────────────────────────────
-let globalECDHKeyPair: CryptoKeyPair | null = null;
-let globalECDHPublicKeyHex = "";
-let globalDPoPKeyPair: CryptoKeyPair | null = null;
-let globalDPoPPublicJWK: JsonWebKey | null = null;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function base64urlEncode(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let binary = '';
-  bytes.forEach(b => (binary += String.fromCharCode(b)));
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+interface TrackItem {
+  id: string;
+  filename: string;
+  duration: number;
+  kid: string;
+  sourceFormat?: string;
+  createdAt: string;
+  manifestKey: string; // path để build proxy URL: /api/media/proxy?key=<manifestKey>
 }
 
-function hexToBase64url(hex: string): string {
-  const bytes = hex.match(/.{1,2}/g)!.map(b => parseInt(b, 16));
-  const binary = String.fromCharCode(...bytes);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+interface DPoPKeyPair {
+  publicKey: CryptoKey;
+  privateKey: CryptoKey;
+  publicKeyJWK: JsonWebKey;
+  thumbprint: string; // jkt — SHA-256 thumbprint of public key
 }
 
-function cekHexToBase64url(hex: string): string {
-  const bytes = hex.match(/.{1,2}/g)!.map(b => parseInt(b, 16));
-  const binary = String.fromCharCode(...bytes);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+interface InspectorEvent {
+  ts: number;
+  type: 'dpop' | 'role' | 'license' | 'stream' | 'error';
+  label: string;
+  detail?: string;
+  ok: boolean;
 }
 
-// Fix: trả về ArrayBuffer trực tiếp để tương thích với Web Crypto API
-function hexToBuffer(hex: string): ArrayBuffer {
-  const bytes = new Uint8Array(hex.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
-  return bytes.buffer.slice(0) as ArrayBuffer;
-}
+const cardEmojis = ['🎸', '🎧', '🔥', '🎵', '🎹', '🎼', '🎺', '🥁', '🎻', '🪗'];
 
-async function createDPoPProof(htm: string, htu: string, accessToken: string): Promise<string> {
-  if (!globalDPoPKeyPair || !globalDPoPPublicJWK) throw new Error('DPoP keypair chưa khởi tạo');
-  const ath = base64urlEncode(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(accessToken))
+// ─────────────────────────────────────────────────────────────────────────────
+// DPoP utilities (Web Crypto — chạy client-side, Next.js "use client")
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function generateDPoPKeyPair(): Promise<DPoPKeyPair> {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'Ed25519' },
+    true,
+    ['sign', 'verify']
+  ) as CryptoKeyPair;
+  const publicKeyJWK = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  // OKP/Ed25519 canonical members (RFC 7638): {crv, kty, x} — não tem campo y
+  const canonical = JSON.stringify({
+    crv: publicKeyJWK.crv,
+    kty: publicKeyJWK.kty,
+    x: publicKeyJWK.x,
+  });
+  const hashBuf = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(canonical)
   );
-  const header = { alg: 'ES256', typ: 'dpop+jwt', jwk: globalDPoPPublicJWK };
+  const thumbprint = btoa(String.fromCharCode(...new Uint8Array(hashBuf)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+
+  return { publicKey: keyPair.publicKey, privateKey: keyPair.privateKey, publicKeyJWK, thumbprint };
+}
+
+/** Tạo DPoP proof JWT theo RFC 9449 (EdDSA/Ed25519) */
+async function createDPoPProof(
+  keyPair: DPoPKeyPair,
+  method: string,
+  url: string,
+  ath: string   // SHA-256(access_token) base64url — đọc từ cookie dpop_ath
+): Promise<string> {
+  const header = {
+    typ: 'dpop+jwt',
+    alg: 'EdDSA',
+    jwk: keyPair.publicKeyJWK,
+  };
+
   const payload = {
     jti: crypto.randomUUID(),
-    htm: htm.toUpperCase(),
-    htu: htu.replace(/\/$/, ''),
+    htm: method.toUpperCase(),
+    htu: url,
     iat: Math.floor(Date.now() / 1000),
     ath,
   };
-  const sigInput =
-    `${base64urlEncode(new TextEncoder().encode(JSON.stringify(header)))}` +
-    `.${base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)))}`;
-  const sig = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    globalDPoPKeyPair.privateKey,
-    new TextEncoder().encode(sigInput)
+
+  const enc = (obj: object) =>
+    btoa(JSON.stringify(obj))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+  const signingInput = `${enc(header)}.${enc(payload)}`;
+  const sigBuf = await crypto.subtle.sign(
+    'Ed25519',
+    keyPair.privateKey,
+    new TextEncoder().encode(signingInput)
   );
-  return `${sigInput}.${base64urlEncode(sig)}`;
+  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+  return `${signingInput}.${sig}`;
 }
 
-// ── R2 Proxy URL helper ───────────────────────────────────────────────────────
-// Mọi request media đều đi qua /api/media/proxy (server-side fetch R2)
-// R2 structure: encrypted-audio/audio/{trackId}/manifest.mpd
-//                                audio/{trackId}/segment_N.m4s
-function getProxyUrl(r2Key: string): string {
-  return `/api/media/proxy?key=${encodeURIComponent(r2Key)}`;
-}
-
-// Chuyển URL Shaka request → R2 key (có prefix "audio/")
-// Input examples:
-//   /r2/encrypted-audio/63721051.../manifest.mpd
-//   /api/media/proxy?key=63721051.../segment_1.m4s  (Shaka resolve relative từ MPD)
-//   https://localhost/api/media/proxy?key=63721051.../init.mp4
-function urlToR2Key(url: string, trackId: string): string {
-  try {
-    const parsed = new URL(url, window.location.origin);
-    const keyParam = parsed.searchParams.get('key');
-    if (keyParam) {
-      return keyParam.startsWith('audio/') ? keyParam : `audio/${keyParam}`;
-    }
-    const filename = parsed.pathname.split('/').pop()?.split('?')[0];
-    if (filename && /\.(m4s|mp4|m4a|mpd)$/.test(filename)) {
-      return `audio/${trackId}/${filename}`;
-    }
-  } catch {
-    const filename = url.split('/').pop()?.split('?')[0] || 'manifest.mpd';
-    return `audio/${trackId}/${filename}`;
-  }
-  return `audio/${trackId}/manifest.mpd`;
+/** Đọc giá trị cookie theo tên */
+function getCookieValue(name: string): string | null {
+  return document.cookie
+    .split('; ')
+    .find(c => c.startsWith(`${name}=`))
+    ?.split('=')[1] ?? null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Sidebar
+// ─────────────────────────────────────────────────────────────────────────────
 
-function PlayerInner() {
+function Sidebar({ role, currentPath }: { role: string | null; currentPath: string }) {
   const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [statusLog, setStatusLog] = useState('Hệ thống sẵn sàng...');
-  const [currentTime, setCurrentTime] = useState('0:00');
-  const [duration, setDuration] = useState('0:00');
-  const [volume, setVolume] = useState(1.0);
-  const [isLoadingStream, setIsLoadingStream] = useState(false);
-  const [songTitle, setSongTitle] = useState('Đang tải dữ liệu...');
-  const [trackId, setTrackId] = useState('');
-  const [targetKID, setTargetKID] = useState('');
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const shakaPlayerRef = useRef<any>(null);
-
-  const formatTime = (secs: number) => {
-    if (isNaN(secs) || secs === Infinity) return '0:00';
-    return `${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, '0')}`;
-  };
-
-  // ── Auth guard ──────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const returnUrl = window.location.pathname + window.location.search;
- 
-    (async () => {
-      // Import từ token.ts — tự refresh nếu gần hết hạn
-      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
-      const token = await getValidToken();
- 
-      if (!token) {
-        clearTokens();
-        router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-      }
-    })();
-  }, [router]);
-
-  // ── Load metadata ───────────────────────────────────────────────────────────
-  useEffect(() => {
-    const id = searchParams.get('trackId') || '';
-    if (!id) return;
-    setTrackId(id);
-    (async () => {
-      try {
-        setStatusLog('🔍 Đang truy vấn metadata...');
-        const { getValidToken } = await import('@/lib/auth/token');
-        const metaToken = await getValidToken();
-        const res = await fetch(`/api/ingest/upload?trackId=${id}`, {
-          headers: { 'Authorization': `Bearer ${metaToken || ''}` }
-        });
-        if (!res.ok) throw new Error('Không tìm thấy bài hát');
-        const json = await res.json();
-        setSongTitle(json.data.track.filename);
-        setTargetKID(json.data.track.kid);
-        setStatusLog('✅ Metadata nạp xong.');
-      } catch (e: any) {
-        setError('Lỗi metadata: ' + e.message);
-      }
-    })();
-  }, [searchParams]);
-
-  // ── Init crypto keypairs ────────────────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        if (!globalECDHKeyPair) {
-          setStatusLog('🔑 Khởi tạo X25519 keypair...');
-          globalECDHKeyPair = await crypto.subtle.generateKey(
-            { name: 'X25519' }, true, ['deriveKey', 'deriveBits']
-          ) as CryptoKeyPair;
-          const raw = await crypto.subtle.exportKey('raw', globalECDHKeyPair.publicKey);
-          globalECDHPublicKeyHex = Array.from(new Uint8Array(raw))
-            .map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-        if (!globalDPoPKeyPair) {
-          setStatusLog('🛡️ Khởi tạo DPoP keypair...');
-          globalDPoPKeyPair = await crypto.subtle.generateKey(
-            { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
+  const links = [
+    { icon: '🏠', label: 'Trang chủ', href: '/', roles: null },
+    { icon: '🎵', label: 'Player', href: '/player', roles: ['music_listener', 'music_uploader'] },
+    { icon: '⬆️', label: 'Upload', href: '/upload', roles: ['music_uploader'] },
+  ];
+  return (
+    <div className="w-64 bg-black p-6 hidden md:flex flex-col gap-8 border-r border-gray-900 shrink-0">
+      <div className="text-2xl font-bold tracking-tighter flex items-center gap-2">
+        <span className="text-emerald-500 text-3xl">♪</span> UITify
+      </div>
+      {role && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-gray-500 font-mono uppercase tracking-widest">Đăng nhập là</span>
+          <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full w-fit bg-emerald-950/60 border border-emerald-800/40 text-emerald-400">
+            {role === 'music_uploader' ? '🎙 Music Uploader' : '🎧 Music Listener'}
+          </span>
+        </div>
+      )}
+      <nav className="flex flex-col gap-2">
+        {links.map((link) => {
+          const canAccess = !link.roles || (role && link.roles.includes(role));
+          return (
+            <button
+              key={link.href}
+              onClick={() => canAccess ? router.push(link.href) : undefined}
+              title={!canAccess ? `Chỉ dành cho ${link.roles?.join(' / ')}` : undefined}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold text-left w-full transition-colors
+                ${currentPath === link.href ? 'text-white bg-gray-800' : ''}
+                ${canAccess
+                  ? 'text-gray-400 hover:text-white hover:bg-gray-900 cursor-pointer'
+                  : 'text-gray-600 cursor-not-allowed opacity-50'
+                }`}
+            >
+              <span>{link.icon}</span>
+              <span>{link.label}</span>
+              {!canAccess && <span className="ml-auto text-[9px] text-gray-600 font-mono">🔒</span>}
+            </button>
           );
-          globalDPoPPublicJWK = await crypto.subtle.exportKey('jwk', globalDPoPKeyPair.publicKey);
-          if (globalDPoPPublicJWK && 'd' in globalDPoPPublicJWK)
-            delete (globalDPoPPublicJWK as any).d;
-        }
-        setStatusLog('✅ Crypto sẵn sàng (ECDH + DPoP).');
-      } catch (e: any) {
-        setError('Lỗi khởi tạo crypto: ' + e.message);
-      }
-    })();
-  }, []);
+        })}
+      </nav>
+    </div>
+  );
+}
 
-  // ── Time tracking ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Security Inspector Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TYPE_META: Record<InspectorEvent['type'], { icon: React.ReactNode; color: string }> = {
+  dpop:    { icon: <Fingerprint size={11} />,  color: 'text-violet-400' },
+  role:    { icon: <ShieldCheck size={11} />,  color: 'text-emerald-400' },
+  license: { icon: <Key size={11} />,          color: 'text-amber-400' },
+  stream:  { icon: <RefreshCw size={11} />,    color: 'text-sky-400' },
+  error:   { icon: <Lock size={11} />,         color: 'text-red-400' },
+};
+
+function Inspector({
+  events,
+  dpopThumbprint,
+  role,
+}: {
+  events: InspectorEvent[];
+  dpopThumbprint: string | null;
+  role: string | null;
+}) {
+  const [open, setOpen] = useState(true);
+  const logRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const onTime = () => setCurrentTime(formatTime(v.currentTime));
-    const onMeta = () => {
-      if (v.duration && v.duration !== Infinity) setDuration(formatTime(v.duration));
-    };
-    v.addEventListener('timeupdate', onTime);
-    v.addEventListener('loadedmetadata', onMeta);
-    return () => {
-      v.removeEventListener('timeupdate', onTime);
-      v.removeEventListener('loadedmetadata', onMeta);
-    };
-  }, []);
-
-  // ── playSong ────────────────────────────────────────────────────────────────
-  const playSong = async () => {
-    if (!trackId || !targetKID) { setError('Chưa nạp dữ liệu bài hát!'); return; }
-    if (!globalECDHKeyPair || !globalDPoPKeyPair) { setError('Crypto chưa sẵn sàng!'); return; }
-
-    setError(null);
-    setIsLoadingStream(true);
-
-    try {
-      const rawToken = localStorage.getItem('token') || '';
-      const licenseUrl = `${window.location.origin}/api/license`;
-
-      // ── 1. DPoP proof + /api/license ─────────────────────────────────────
-      setStatusLog('🛡️ Đang tạo DPoP proof...');
-      const dpopProof = await createDPoPProof('POST', licenseUrl, rawToken);
-
-      setStatusLog('📡 Đang thực hiện ECDH key exchange...');
-      const licenseRes = await fetch(licenseUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${rawToken}`,
-          'DPoP': dpopProof,
-          'x-kid': targetKID,
-          'x-client-public-key': globalECDHPublicKeyHex,
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!licenseRes.ok) {
-        const errText = await licenseRes.text().catch(() => '');
-        throw new Error(`License API lỗi ${licenseRes.status}: ${errText}`);
-      }
-
-      const responseBuf = new Uint8Array(await licenseRes.arrayBuffer());
-      const payloadLen = new DataView(responseBuf.buffer).getUint32(0, false);
-      const licenseData = JSON.parse(
-        new TextDecoder().decode(responseBuf.slice(4, 4 + payloadLen))
-      );
-
-      // ── 2. X25519 unwrap CEK ──────────────────────────────────────────────
-      setStatusLog('🔓 Đang giải mã CEK qua X25519...');
-
-      const serverPubKey = await crypto.subtle.importKey(
-        'raw', hexToBuffer(licenseData.serverPublicKey),
-        { name: 'X25519' }, false, []
-      );
-
-      const sharedBits = await crypto.subtle.deriveBits(
-        { name: 'X25519', public: serverPubKey },
-        globalECDHKeyPair.privateKey, 256
-      );
-
-      const hkdfKey = await crypto.subtle.importKey(
-        'raw', sharedBits, { name: 'HKDF' }, false, ['deriveBits']
-      );
-      const aesKeyBuf = await crypto.subtle.deriveBits(
-        {
-          name: 'HKDF',
-          hash: 'SHA-256',
-          salt: new Uint8Array(0),
-          info: new TextEncoder().encode('cek-wrapping-v1'),
-        },
-        hkdfKey, 256
-      );
-      const aesKey = await crypto.subtle.importKey(
-        'raw', aesKeyBuf, { name: 'AES-GCM' }, false, ['decrypt']
-      );
-
-      const cekBuf = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: hexToBuffer(licenseData.iv), tagLength: 128 },
-        aesKey,
-        hexToBuffer(licenseData.wrappedCek)
-      );
-
-      const cekHex = Array.from(new Uint8Array(cekBuf))
-        .map(b => b.toString(16).padStart(2, '0')).join('');
-
-      // ── 3. Khởi tạo Shaka Player ──────────────────────────────────────────
-      setStatusLog('🎬 Đang khởi tạo Shaka Player...');
-      const shaka = await import('shaka-player');
-      shaka.default.polyfill.installAll();
-
-      if (!shaka.default.Player.isBrowserSupported()) {
-        throw new Error('Browser không hỗ trợ Shaka Player');
-      }
-
-      if (shakaPlayerRef.current) {
-        await shakaPlayerRef.current.destroy();
-        shakaPlayerRef.current = null;
-      }
-
-      const player = new shaka.default.Player();
-      await player.attach(videoRef.current!);
-      shakaPlayerRef.current = player;
-
-      // ── 3b. ClearKey config + response filter ────────────────────────────
-      const kidHex = licenseData.kid.replace(/-/g, '').toLowerCase();
-      const kidUuid = licenseData.kid.toLowerCase();
-      const kidB64 = hexToBase64url(kidHex);
-      const cekB64 = cekHexToBase64url(cekHex);
-
-      // Thử tất cả format KID vì các Shaka version khác nhau expect khác nhau
-      player.configure({
-        drm: {
-          clearKeys: {
-            [kidHex]: cekHex,    // hex thuần (Shaka >= 4.3)
-            [kidUuid]: cekHex,   // UUID với dashes
-            [kidB64]: cekB64,    // base64url (W3C ClearKey spec)
-          },
-        },
-      });
-
-      // Response filter: override license JSON Shaka tự build từ MPD
-      const licenseJson = JSON.stringify({
-        keys: [{ kty: 'oct', kid: kidB64, k: cekB64 }],
-        type: 'temporary',
-      });
-      player.getNetworkingEngine()?.registerResponseFilter(
-        (type: number, response: any) => {
-          if (type !== 5) return;
-          response.data = new TextEncoder().encode(licenseJson).buffer;
-        }
-      );
-
-      // ── 4. Network filter: MANIFEST + SEGMENT → proxy /api/media/proxy ───
-      player.getNetworkingEngine()?.registerRequestFilter(
-        async (type: number, request: any) => {
-          // type 5 = LICENSE → Shaka fetch data: URI, không cần proxy
-          if (type === 5) return;
-          if (request.uris[0]?.startsWith('data:')) return;
- 
-          // Luôn lấy token mới nhất — tự refresh nếu gần hết hạn
-          const { getValidToken, clearTokens } = await import('@/lib/auth/token');
-          const freshToken = await getValidToken();
-          if (!freshToken) {
-            clearTokens();
-            router.replace('/login');
-            return;
-          }
-          request.headers['Authorization'] = `Bearer ${freshToken}`;
- 
-          const originalUrl: string = request.uris[0];
-          if (originalUrl.includes('/api/media/proxy?key=')) return;
- 
-          const r2Key = urlToR2Key(originalUrl, trackId);
-          request.uris = [getProxyUrl(r2Key)];
-        }
-      );
-
-      player.addEventListener('error', (event: any) => {
-        setError(`Shaka error: ${event.detail?.message || 'Unknown'}`);
-      });
-
-      // ── 5. Load MPD từ R2 (qua signed URL filter) ─────────────────────────
-      setStatusLog('📥 Đang load stream...');
-      const mpdUrl = `${window.location.origin}/api/media/proxy?key=${encodeURIComponent(`audio/${trackId}/manifest.mpd`)}`;
-      await player.load(mpdUrl);
-
-      videoRef.current!.volume = volume;
-      await videoRef.current!.play();
-      setIsPlaying(true);
-      setIsLoadingStream(false);
-      setStatusLog('🎵 Đang phát từ R2');
-
-    } catch (err: any) {
-      setError(err.message);
-      setIsLoadingStream(false);
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  };
-
-  const stopPlay = async () => {
-    if (shakaPlayerRef.current) {
-      await shakaPlayerRef.current.destroy();
-      shakaPlayerRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.src = '';
-    }
-    // Xóa signed URL cache khi dừng
-    setIsPlaying(false);
-    setIsLoadingStream(false);
-    setStatusLog('⏹ Đã dừng.');
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = parseFloat(e.target.value);
-    setVolume(v);
-    if (videoRef.current) videoRef.current.volume = v;
-  };
+  }, [events]);
 
   return (
-    <div className="min-h-screen bg-gray-950 p-6 flex flex-col items-center justify-center relative select-none">
+    <div className="border-t border-gray-900 bg-black/80 backdrop-blur-md shrink-0">
+      {/* Header bar */}
       <button
-        onClick={() => router.push('/')}
-        className="absolute top-6 left-6 bg-gray-900 border border-gray-800 text-gray-300 px-4 py-2 rounded-full font-semibold hover:bg-gray-800 transition-all shadow-md"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-2 hover:bg-gray-900/60 transition-colors"
       >
-        ✕ Quay lại
+        <div className="flex items-center gap-2 text-[11px] font-mono font-bold text-gray-400">
+          <ShieldCheck size={13} className="text-emerald-500" />
+          Security Inspector
+          {events.length > 0 && (
+            <span className="bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-[9px]">
+              {events.length}
+            </span>
+          )}
+        </div>
+        {open ? <ChevronDown size={13} className="text-gray-600" /> : <ChevronUp size={13} className="text-gray-600" />}
       </button>
 
-      <h1 className="text-3xl font-bold text-white mb-2">Secure Audio Player</h1>
-      <p className="text-gray-400 mb-10 text-sm">Mật Mã học NT219 - UIT</p>
-
-      <div className="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-800 p-6 flex flex-col gap-5">
-        <div className="flex items-center gap-4">
-          <div className={`w-16 h-16 ${isPlaying ? 'bg-emerald-600 animate-pulse border-emerald-500' : 'bg-gray-800'} rounded-xl flex items-center justify-center border-2 shadow-lg`}>
-            <span className="text-white text-3xl">🎵</span>
+      {open && (
+        <div className="px-4 pb-3 flex flex-col gap-2">
+          {/* Status pills */}
+          <div className="flex flex-wrap gap-2 pt-0.5">
+            <Pill
+              label="DPoP"
+              value={dpopThumbprint ? `jkt: ${dpopThumbprint.slice(0, 8)}…` : 'Đang tạo…'}
+              ok={!!dpopThumbprint}
+              icon={<Fingerprint size={10} />}
+            />
+            <Pill
+              label="Role"
+              value={role ?? '…'}
+              ok={role === 'music_listener'}
+              icon={<ShieldCheck size={10} />}
+            />
+            <Pill
+              label="Replay Guard"
+              value="Redis JTI"
+              ok
+              icon={<Lock size={10} />}
+            />
+            <Pill
+              label="JWKS Verify"
+              value="Keycloak"
+              ok={!!role}
+              icon={<Key size={10} />}
+            />
           </div>
-        </div>
 
-        <video
-          ref={videoRef}
-          className="hidden"
-          playsInline
-          onEnded={() => setIsPlaying(false)}
-        />
-
-        <div className="flex items-center justify-between px-3 py-2 bg-gray-950/60 border border-gray-800 rounded-xl font-mono text-xs text-gray-400">
-          <span>Thời gian:</span>
-          <span className="text-emerald-400 font-semibold">{currentTime} / {duration}</span>
-        </div>
-
-        <div className="flex items-center gap-3 px-3 py-2.5 bg-gray-950/60 border border-gray-800 rounded-xl">
-          <span className="text-gray-500 text-xs">🔊</span>
-          <input
-            type="range" min="0" max="1" step="0.05" value={volume}
-            onChange={handleVolumeChange}
-            className="flex-1 accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer"
-          />
-        </div>
-
-        <div className="flex gap-3 mt-1">
-          <button
-            onClick={playSong}
-            disabled={isPlaying || isLoadingStream}
-            className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm disabled:opacity-40 transition-all shadow-md"
+          {/* Event log */}
+          <div
+            ref={logRef}
+            className="h-28 overflow-y-auto flex flex-col gap-0.5 font-mono text-[10px] bg-gray-950/60 rounded-md border border-gray-900 px-2 py-1.5"
           >
-            {isLoadingStream ? '⏳ Đang kết nối...' : '▶ Phát'}
-          </button>
-          <button
-            onClick={stopPlay}
-            disabled={!isPlaying && !isLoadingStream}
-            className="bg-gray-800 text-gray-300 px-5 py-3 rounded-xl font-semibold text-sm disabled:opacity-40 transition-all border border-gray-700 shadow-md"
-          >
-            ⏹ Dừng
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-5 w-full max-w-md p-3 bg-gray-900/60 border border-gray-800 rounded-xl flex items-center justify-between">
-        <span className="text-[11px] text-gray-400">Pipeline:</span>
-        <span className="text-[11px] font-mono font-semibold text-emerald-400 truncate max-w-[250px]">{statusLog}</span>
-      </div>
-
-      {error && (
-        <div className="mt-4 w-full max-w-md p-4 bg-red-950/40 border border-red-900/50 text-red-300 rounded-xl font-mono text-xs">
-          Lỗi: {error}
+            {events.length === 0 ? (
+              <span className="text-gray-700 italic">Chưa có sự kiện…</span>
+            ) : (
+              events.map((ev) => {
+                const meta = TYPE_META[ev.type];
+                const time = new Date(ev.ts).toLocaleTimeString('vi-VN', {
+                  hour12: false,
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                });
+                return (
+                  <div key={ev.ts + ev.label} className="flex items-start gap-1.5 leading-tight">
+                    <span className="text-gray-600 shrink-0 tabular-nums">{time}</span>
+                    <span className={`shrink-0 ${meta.color}`}>{meta.icon}</span>
+                    <span className={ev.ok ? 'text-gray-300' : 'text-red-400'}>
+                      {ev.label}
+                      {ev.detail && (
+                        <span className="text-gray-600 ml-1">{ev.detail}</span>
+                      )}
+                    </span>
+                    <span className="ml-auto shrink-0">{ev.ok ? '✓' : '✗'}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
+function Pill({
+  label, value, ok, icon,
+}: { label: string; value: string; ok: boolean; icon: React.ReactNode }) {
+  return (
+    <div className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[9px] font-mono
+      ${ok
+        ? 'bg-emerald-950/40 border-emerald-900/40 text-emerald-400'
+        : 'bg-gray-900/60 border-gray-800 text-gray-500'
+      }`}
+    >
+      {icon}
+      <span className="text-gray-600">{label}:</span>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PlayerInner
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PlayerInner() {
+  const router       = useRouter();
+  const searchParams = useSearchParams();
+  const trackId      = searchParams.get('trackId');
+
+  const [user, setUser]   = useState<JWTPayload | null>(null);
+  const [role, setRole]   = useState<string | null>(null);
+  const [tracks, setTracks]     = useState<TrackItem[]>([]);
+  const [currentTrack, setCurrentTrack] = useState<TrackItem | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted]   = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [volume, setVolume]     = useState(80);
+  const [audioError, setAudioError] = useState<string | null>(null);
+
+  // Audio refs
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const shakaRef = useRef<any>(null);
+
+  // DPoP
+  const [dpopKeyPair, setDpopKeyPair] = useState<DPoPKeyPair | null>(null);
+
+  // Inspector
+  const [inspectorEvents, setInspectorEvents] = useState<InspectorEvent[]>([]);
+
+
+  const addEvent = useCallback((ev: Omit<InspectorEvent, 'ts'>) => {
+    setInspectorEvents(prev => [...prev.slice(-49), { ...ev, ts: Date.now() }]);
+  }, []);
+
+  // ── 1. Auth ───────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const init = async () => {
+      const u = await getCurrentUser();
+      if (!u) { router.replace('/login'); return; }
+      const r = getRoleFromPayload(u);
+      if (r !== 'music_listener') { router.replace('/403'); return; }
+      setUser(u);
+      setRole(r);
+      addEvent({ type: 'role', label: `Role verified: ${r}`, ok: true });
+    };
+    init();
+  }, [router, addEvent]);
+
+  // ── 2. Tạo DPoP key pair (1 lần khi mount) ────────────────────────────────
+  useEffect(() => {
+    generateDPoPKeyPair().then((kp) => {
+      setDpopKeyPair(kp);
+      addEvent({
+        type: 'dpop',
+        label: 'DPoP keypair generated (EdDSA/Ed25519)',
+        detail: `jkt: ${kp.thumbprint.slice(0, 12)}…`,
+        ok: true,
+      });
+    });
+  }, [addEvent]);
+
+  // ── 2b. Auto-refresh token mỗi 4 phút (trước khi 5-phút cookie hết hạn) ──
+  useEffect(() => {
+    if (!role) return;
+    const id = setInterval(async () => {
+      const ok = await refreshAccessToken();
+      if (!ok) router.replace('/login');
+    }, 240_000);
+    return () => clearInterval(id);
+  }, [role, router]);
+
+  // ── 3. Fetch track list (dùng DPoP nếu sẵn, fallback plain bearer) ────────
+  useEffect(() => {
+    if (!role) return;
+
+    const fetchTracks = async () => {
+      try {
+        const headers: HeadersInit = {};
+        const ath = getCookieValue('dpop_ath');
+        if (ath && dpopKeyPair) {
+          const proof = await createDPoPProof(
+            dpopKeyPair,
+            'GET',
+            `${window.location.origin}/api/tracks`,
+            ath
+          );
+          headers['DPoP'] = proof;
+          addEvent({ type: 'dpop', label: 'DPoP proof gửi → /api/tracks', ok: true });
+        }
+
+        const res = await fetch('/api/tracks', {
+          credentials: 'include',
+          headers,
+        });
+
+        if (res.ok) {
+          const json = await res.json();
+          const list: TrackItem[] = Array.isArray(json.data) ? json.data : [];
+          setTracks(list);
+          const selected = trackId ? list.find(t => t.id === trackId) : list[0];
+          setCurrentTrack(selected ?? list[0] ?? null);
+          addEvent({ type: 'stream', label: `Tải ${list.length} track thành công`, ok: true });
+        } else {
+          addEvent({ type: 'error', label: `Lỗi tải track: HTTP ${res.status}`, ok: false });
+        }
+      } catch (err: any) {
+        addEvent({ type: 'error', label: 'Không thể tải track', detail: err?.message, ok: false });
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchTracks();
+  }, [role, trackId, dpopKeyPair, addEvent]);
+
+  // ── 4. ECDH unwrap CEK từ license response ───────────────────────────────────
+  // Server dùng X25519 + HKDF + AES-256-GCM để wrap CEK
+  // Client generate X25519 keypair, gửi pubkey lên, nhận wrappedCek + serverPubKey + iv
+  const unwrapCEK = async (
+    clientPrivKey: CryptoKey,
+    serverPubHex: string,
+    wrappedCekHex: string,
+    ivHex: string,
+  ): Promise<string> => {
+    // Server dùng X25519 (ecdh.ts) — client phải dùng X25519 để match
+    // Import server ephemeral public key (raw 32 bytes X25519)
+    const serverPubRaw = new Uint8Array(serverPubHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+    const serverPubKey = await crypto.subtle.importKey(
+      'raw', serverPubRaw, { name: 'X25519' }, false, []
+    );
+
+    // X25519 ECDH shared secret
+    const sharedBits = await crypto.subtle.deriveBits(
+      { name: 'X25519', public: serverPubKey },
+      clientPrivKey,
+      256
+    );
+
+    // HKDF → AES-256-GCM key (mirror server: info='cek-wrapping-v1', salt=empty)
+    const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+    const aesKey  = await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF', hash: 'SHA-256',
+        salt: new Uint8Array(0),
+        info: new TextEncoder().encode('cek-wrapping-v1'),
+      },
+      hkdfKey,
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['decrypt']
+    );
+
+    // AES-256-GCM decrypt (last 16 bytes = auth tag)
+    const wrappedBytes = new Uint8Array(wrappedCekHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+    const iv           = new Uint8Array(ivHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+    const ciphertext   = wrappedBytes.slice(0, -16);
+    const authTag      = wrappedBytes.slice(-16);
+    const combined     = new Uint8Array([...ciphertext, ...authTag]);
+
+    const cekBytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, combined);
+    return Array.from(new Uint8Array(cekBytes)).map(b => b.toString(16).padStart(2,'0')).join('');
+  };
+
+  // ── 5. Khởi tạo Shaka Player với ClearKey ────────────────────────────────────
+  const initShaka = useCallback(async (track: TrackItem, cekHex: string) => {
+    setAudioError(null);
+
+    // Teardown player cũ
+    if (shakaRef.current) {
+      try { await shakaRef.current.destroy(); } catch {}
+      shakaRef.current = null;
+    }
+    if (!audioRef.current) return;
+
+    try {
+      const shakaModule = await import('shaka-player/dist/shaka-player.compiled');
+      const shaka = (shakaModule as any).default ?? shakaModule;
+      shaka.polyfill.installAll();
+
+      if (!shaka.Player.isBrowserSupported()) {
+        setAudioError('Trình duyệt không hỗ trợ Shaka Player');
+        return;
+      }
+
+      const player = new shaka.Player(audioRef.current);
+      shakaRef.current = player;
+
+      // Shaka ClearKey format (RFC 8188 / W3C ClearKey):
+      //   kid = 16 bytes = 32 hex chars
+      //   key = 16 bytes = 32 hex chars (AES-128-CTR)
+      //
+      // CEK từ server: 32 hex chars (16 bytes) — đúng AES-128, không cần slice.
+      // kid từ DB có thể có dashes hoặc độ dài lẻ → normalize.
+      const kidHex = track.kid.replace(/-/g, '').slice(0, 32).padStart(32, '0');
+      const keyHex = cekHex; // CEK đã là 32 hex chars (16 bytes) từ KMS
+
+      console.log('[Shaka] kidHex:', kidHex, '— len:', kidHex.length, '(expect 32)');
+      console.log('[Shaka] keyHex:', keyHex, '— len:', keyHex.length, '(expect 32)');
+
+      if (kidHex.length !== 32 || keyHex.length !== 32) {
+        throw new Error(`ClearKey format error: kid=${kidHex.length} key=${keyHex.length} (both must be 32)`);
+      }
+
+      player.configure({
+        drm: {
+          clearKeys: {
+            [kidHex]: keyHex,
+          },
+        },
+      });
+
+      // Gắn Bearer token vào mọi request qua proxy
+      // Shaka fetch manifest + segments — intercept và route qua /api/media/proxy
+      // để gắn Bearer token (R2 không nhận token trực tiếp)
+      // Pre-compute manifest key + R2 directory prefix dùng cho relative URL resolution
+      const manifestKey = track.manifestKey || `${track.id}/manifest.mpd`;
+      const r2Dir = manifestKey.substring(0, manifestKey.lastIndexOf('/') + 1);
+      const proxyBase = `${window.location.origin}/api/media/proxy?key=`;
+
+      // Route tất cả media request qua proxy — xử lý 2 trường hợp:
+      // 1. R2 direct URL (cross-origin) → extract audio path, rewrite sang proxy
+      // 2. Same-origin nhưng sai endpoint — Shaka resolve relative URL từ MPD
+      //    e.g., /api/media/init.mp4 thay vì /api/media/proxy?key=audio/trackId/init.mp4
+      player.getNetworkingEngine()!.registerRequestFilter((_type: any, request: any) => {
+        const url: string = request.uris[0];
+        if (!url || url.startsWith(proxyBase)) return;
+
+        if (!url.startsWith(window.location.origin) && !url.startsWith('/')) {
+          // Case 1: R2 direct URL
+          try {
+            const parsed = new URL(url);
+            const parts = parsed.pathname.split('/');
+            const audioIdx = parts.findIndex((p: string) => p === 'audio');
+            if (audioIdx !== -1) {
+              request.uris[0] = `${proxyBase}${encodeURIComponent(parts.slice(audioIdx).join('/'))}`;
+            }
+          } catch { /* keep original */ }
+          return;
+        }
+
+        // Case 2: Same-origin nhưng không phải proxy URL
+        const fileName = url.split('/').pop()?.split('?')[0] ?? '';
+        if (fileName.match(/\.(m4s|mp4|m4a|mpd|cmfa|cmfv)$/i)) {
+          request.uris[0] = `${proxyBase}${encodeURIComponent(r2Dir + fileName)}`;
+        }
+      });
+
+      player.addEventListener('error', (e: any) => {
+        const msg = e?.detail?.message ?? 'Shaka error';
+        setAudioError(`Lỗi phát: ${msg}`);
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: `Shaka error: ${msg}`, ok: false });
+      });
+
+      audioRef.current.addEventListener('timeupdate', () => {
+        const el = audioRef.current!;
+        if (!el.duration) return;
+        setProgress((el.currentTime / el.duration) * 100);
+      });
+      audioRef.current.addEventListener('ended', () => {
+        setIsPlaying(false);
+        setProgress(100);
+      });
+
+      const manifestUrl = `/api/media/proxy?key=${encodeURIComponent(manifestKey)}`;
+      console.log('[Shaka] Loading manifest:', manifestUrl);
+      await player.load(manifestUrl);
+      audioRef.current.play();
+
+      addEvent({ type: 'stream', label: `Shaka ClearKey stream: ${track.filename}`, ok: true });
+    } catch (err: any) {
+      console.error('[initShaka] Error:', err);
+      const msg = err?.message ?? String(err) ?? 'unknown';
+      setAudioError(`Lỗi khởi tạo player: ${msg}`);
+      setIsPlaying(false);
+      addEvent({ type: 'error', label: 'Shaka init failed', detail: msg, ok: false });
+    }
+  }, [addEvent]);
+
+  // Sync play/pause
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (isPlaying) { el.play().catch(() => {}); }
+    else           { el.pause(); }
+  }, [isPlaying]);
+
+  // Sync volume/mute
+  useEffect(() => {
+    if (!audioRef.current) return;
+    audioRef.current.volume = isMuted ? 0 : volume / 100;
+  }, [volume, isMuted]);
+
+  // Cleanup khi unmount
+  useEffect(() => {
+    return () => {
+      if (shakaRef.current) { try { shakaRef.current.destroy(); } catch {} }
+    };
+  }, []);
+
+  // ── 5. Fetch license với DPoP khi chuyển track ───────────────────────────
+  const fetchLicenseAndPlay = useCallback(async (track: TrackItem) => {
+    if (!dpopKeyPair) return;
+    const ath = getCookieValue('dpop_ath');
+    if (!ath) {
+      setAudioError('Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.');
+      setIsPlaying(false);
+      addEvent({ type: 'error', label: 'Cookie dpop_ath hết hạn', ok: false });
+      return;
+    }
+
+    const licenseUrl = `${window.location.origin}/api/license`;
+    try {
+      // ── 1. DPoP proof ──────────────────────────────────────────────────
+      const proof = await createDPoPProof(dpopKeyPair, 'POST', licenseUrl, ath);
+      addEvent({ type: 'dpop', label: `DPoP proof → /api/license (kid: ${track.kid.slice(0, 8)}…)`, ok: true });
+
+      // ── 2. X25519 keypair phía client (mirror server ecdh.ts dùng x25519) ─
+      const ecdhKeyPair = await crypto.subtle.generateKey(
+        { name: 'X25519' },
+        true,
+        ['deriveBits']
+      ) as CryptoKeyPair;
+      // Export raw public key (32 bytes X25519)
+      const clientPubRaw = await crypto.subtle.exportKey('raw', ecdhKeyPair.publicKey);
+      const clientPubHex = Array.from(new Uint8Array(clientPubRaw))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+      // ── 3. Gọi /api/license ────────────────────────────────────────────
+      const res = await fetch(licenseUrl, {
+        method: 'POST',
+        headers: {
+          DPoP: proof,
+          'x-kid': track.kid,
+          'x-client-public-key': clientPubHex,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Uint8Array(0),
+        credentials: 'include',
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body?.error ?? body?.detail ?? `HTTP ${res.status}`;
+        setAudioError(`License thất bại: ${msg}`);
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: `License thất bại: ${msg}`, ok: false });
+        return;
+      }
+
+      // ── 4. Parse binary license [4-byte len][payload][sig] ─────────────
+      // Format: [UInt32BE payloadLen][payload bytes][signature bytes]
+      const buf        = await res.arrayBuffer();
+      const view       = new DataView(buf);
+      const payloadLen = view.getUint32(0);
+      const payloadBuf = buf.slice(4, 4 + payloadLen);
+      const sigBuf     = buf.slice(4 + payloadLen); // Ed25519 sig = 64 bytes
+      const licensePayload = JSON.parse(new TextDecoder().decode(payloadBuf));
+
+      // ── 5. Verify chữ ký Ed25519 ────────────────────────────────────────
+      // Server gửi public key qua header X-License-Signing-Key (JWK OKP/Ed25519)
+      // Client verify trước khi dùng bất kỳ dữ liệu nào trong payload
+      const signingKeyHeader = res.headers.get('X-License-Signing-Key');
+      if (!signingKeyHeader) {
+        setAudioError('License thiếu signing key header');
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: 'Thiếu X-License-Signing-Key', ok: false });
+        return;
+      }
+      let sigPubKey: CryptoKey;
+      try {
+        const sigPubJwk = JSON.parse(signingKeyHeader) as JsonWebKey;
+        sigPubKey = await crypto.subtle.importKey(
+          'jwk',
+          sigPubJwk,
+          { name: 'Ed25519' },
+          false,
+          ['verify']
+        );
+      } catch (err: any) {
+        setAudioError('Không thể import signing public key');
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: 'Import Ed25519 pubkey thất bại', detail: err?.message, ok: false });
+        return;
+      }
+
+      const sigValid = await crypto.subtle.verify(
+        'Ed25519',
+        sigPubKey,
+        sigBuf,
+        payloadBuf
+      );
+
+      if (!sigValid) {
+        setAudioError('Chữ ký license không hợp lệ — từ chối phát');
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: 'Ed25519 verify FAILED — license bị giả mạo?', ok: false });
+        return;
+      }
+
+      addEvent({
+        type: 'license',
+        label: `License OK + Ed25519 verified — kid: ${licensePayload.kid?.slice(0, 8)}…`,
+        detail: `wrappedCek: ${licensePayload.wrappedCek?.slice(0, 12)}…`,
+        ok: true,
+      });
+
+      // ── 6. ECDH unwrap CEK ─────────────────────────────────────────────
+      // Server dùng P-256 ECDH + HKDF-SHA256 + AES-256-GCM để wrap CEK
+      console.log('[License] serverPublicKey:', licensePayload.serverPublicKey?.slice(0,16));
+      console.log('[License] wrappedCek len:', licensePayload.wrappedCek?.length);
+      console.log('[License] iv:', licensePayload.iv);
+      let cekHex: string;
+      try {
+        cekHex = await unwrapCEK(
+          (ecdhKeyPair as CryptoKeyPair).privateKey,
+          licensePayload.serverPublicKey,
+          licensePayload.wrappedCek,
+          licensePayload.iv,
+        );
+        console.log('[License] CEK unwrapped, length:', cekHex.length);
+      } catch (unwrapErr: any) {
+        console.error('[License] unwrapCEK failed:', unwrapErr);
+        setAudioError(`ECDH unwrap thất bại: ${unwrapErr?.message}`);
+        setIsPlaying(false);
+        addEvent({ type: 'error', label: 'ECDH unwrap CEK thất bại', detail: unwrapErr?.message, ok: false });
+        return;
+      }
+      addEvent({ type: 'license', label: 'CEK unwrapped (X25519+HKDF+AES-256-GCM)', ok: true });
+
+      // ── 7. Khởi động Shaka với ClearKey ───────────────────────────────
+      console.log('[License] Launching Shaka with kid:', track.kid, 'cekLen:', cekHex.length);
+      await initShaka(track, cekHex);
+
+    } catch (err: any) {
+      console.error('[fetchLicenseAndPlay] Error:', err);
+      const msg = err?.message ?? String(err) ?? 'unknown';
+      setAudioError(`Lỗi: ${msg}`);
+      setIsPlaying(false);
+      addEvent({ type: 'error', label: 'fetchLicenseAndPlay lỗi', detail: msg, ok: false });
+    }
+  }, [dpopKeyPair, addEvent, initShaka]);
+
+
+  const handleSelectTrack = useCallback((track: TrackItem) => {
+    setCurrentTrack(track);
+    setProgress(0);
+    setAudioError(null);
+    setIsPlaying(true);
+    router.replace(`/player?trackId=${track.id}`, { scroll: false });
+    fetchLicenseAndPlay(track);
+  }, [router, fetchLicenseAndPlay]);
+
+  const handleSkip = (dir: 'prev' | 'next') => {
+    if (!tracks.length || !currentTrack) return;
+    const idx  = tracks.findIndex(t => t.id === currentTrack.id);
+    const next = dir === 'next'
+      ? tracks[(idx + 1) % tracks.length]
+      : tracks[(idx - 1 + tracks.length) % tracks.length];
+    handleSelectTrack(next);
+  };
+
+  const elapsed = currentTrack
+    ? Math.floor((progress / 100) * currentTrack.duration)
+    : 0;
+  const fmt = (s: number) =>
+    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────
+
+  return (
+    <div className="flex h-screen bg-black text-white font-sans overflow-hidden select-none">
+      <Sidebar role={role} currentPath="/player" />
+
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-900 bg-black/40 backdrop-blur-md">
+          <h1 className="text-lg font-bold text-white flex items-center gap-2">
+            <Music2 size={20} className="text-emerald-500" /> Player
+          </h1>
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-900/40 px-2.5 py-1 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+              DPoP Active
+            </span>
+            <button
+              onClick={() => logout()}
+              className="bg-red-500/10 text-red-400 border border-red-900/50 px-4 py-1.5 rounded-full font-bold text-sm hover:bg-red-500 hover:text-white transition-all duration-200"
+            >
+              Đăng xuất
+            </button>
+          </div>
+        </div>
+
+        {/* Main area + Inspector stacked vertically */}
+        <div className="flex flex-1 overflow-hidden flex-col">
+          <div className="flex flex-1 overflow-hidden">
+            {/* Track list */}
+            <div className="w-72 border-r border-gray-900 overflow-y-auto p-4 flex flex-col gap-2 shrink-0">
+              <p className="text-[10px] font-mono text-gray-500 uppercase tracking-widest mb-2">
+                Danh sách phát
+              </p>
+              {isLoading ? (
+                <div className="flex items-center gap-2 text-xs text-emerald-400 font-mono">
+                  <div className="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                  Đang tải...
+                </div>
+              ) : tracks.length === 0 ? (
+                <p className="text-xs text-gray-600 font-mono">Chưa có bài hát nào.</p>
+              ) : (
+                tracks.map((track, idx) => (
+                  <button
+                    key={track.id}
+                    onClick={() => handleSelectTrack(track)}
+                    className={`flex items-center gap-3 p-2.5 rounded-lg text-left w-full transition-colors group
+                      ${currentTrack?.id === track.id
+                        ? 'bg-emerald-900/30 border border-emerald-800/40'
+                        : 'hover:bg-gray-900 border border-transparent'
+                      }`}
+                  >
+                    <div className="w-9 h-9 bg-gradient-to-br from-emerald-600 to-teal-900 rounded-md flex items-center justify-center text-lg shrink-0">
+                      {cardEmojis[idx % cardEmojis.length]}
+                    </div>
+                    <div className="overflow-hidden">
+                      <p className={`text-xs font-bold truncate ${currentTrack?.id === track.id ? 'text-emerald-400' : 'text-white'}`}>
+                        {track.filename}
+                      </p>
+                      <p className="text-[10px] text-gray-500 font-mono">
+                        {Math.floor(track.duration / 60)}:{String(track.duration % 60).padStart(2, '0')}
+                      </p>
+                    </div>
+                    {currentTrack?.id === track.id && isPlaying && (
+                      <div className="ml-auto shrink-0 flex gap-0.5 items-end h-4">
+                        {[1, 2, 3].map(i => (
+                          <div
+                            key={i}
+                            className="w-0.5 bg-emerald-400 rounded-full animate-bounce"
+                            style={{ height: `${30 + i * 20}%`, animationDelay: `${i * 0.1}s` }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+
+            {/* Now playing */}
+            <div className="flex-1 flex flex-col items-center justify-center p-8 bg-gradient-to-b from-gray-900 to-black overflow-y-auto">
+              {currentTrack ? (
+                <>
+                  {/* Hidden audio element for dash.js */}
+                  <audio ref={audioRef} className="hidden" />
+
+                  {/* Error banner */}
+                  {audioError && (
+                    <div className="w-full max-w-sm mb-4 flex items-start gap-2 bg-red-950/40 border border-red-800/50 rounded-lg px-3 py-2.5 text-xs text-red-400 font-mono">
+                      <span className="shrink-0 mt-0.5">⚠</span>
+                      <span>{audioError}</span>
+                    </div>
+                  )}
+
+                  {/* Cover */}
+                  <div className={`w-48 h-48 bg-gradient-to-br from-emerald-600 to-teal-900 rounded-2xl flex items-center justify-center text-7xl shadow-2xl mb-6 transition-all duration-500 ${isPlaying ? 'scale-105 shadow-emerald-900/40' : ''}`}>
+                    {cardEmojis[tracks.findIndex(t => t.id === currentTrack.id) % cardEmojis.length]}
+                  </div>
+
+                  {/* Info */}
+                  <div className="text-center mb-5">
+                    <h2 className="text-xl font-bold text-white mb-1">{currentTrack.filename}</h2>
+                    <p className="text-xs text-gray-400 font-mono">KID: {currentTrack.kid.substring(0, 12)}…</p>
+                  </div>
+
+                  {/* Progress */}
+                  <div className="w-full max-w-sm mb-4">
+                    <div
+                      className="h-1 bg-gray-800 rounded-full overflow-hidden cursor-pointer"
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const pct = (e.clientX - rect.left) / rect.width;
+                        setProgress(pct * 100);
+                        if (audioRef.current && audioRef.current.duration) {
+                          audioRef.current.currentTime = pct * audioRef.current.duration;
+                        }
+                      }}
+                    >
+                      <div
+                        className="h-full bg-emerald-500 rounded-full transition-all duration-1000"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[10px] text-gray-500 font-mono mt-1">
+                      <span>{fmt(elapsed)}</span>
+                      <span>{fmt(currentTrack.duration)}</span>
+                    </div>
+                  </div>
+
+                  {/* Controls */}
+                  <div className="flex items-center gap-6 mb-5">
+                    <button onClick={() => handleSkip('prev')} className="text-gray-400 hover:text-white transition-colors">
+                      <SkipBack size={22} />
+                    </button>
+                    <button
+                      onClick={() => setIsPlaying(p => !p)}
+                      className="w-14 h-14 bg-white rounded-full flex items-center justify-center hover:scale-105 transition-transform shadow-lg"
+                    >
+                      {isPlaying
+                        ? <Pause size={24} fill="black" color="black" />
+                        : <Play size={24} fill="black" color="black" className="ml-1" />
+                      }
+                    </button>
+                    <button onClick={() => handleSkip('next')} className="text-gray-400 hover:text-white transition-colors">
+                      <SkipForward size={22} />
+                    </button>
+                  </div>
+
+                  {/* Volume */}
+                  <div className="flex items-center gap-3 w-full max-w-[200px]">
+                    <button onClick={() => setIsMuted(m => !m)} className="text-gray-400 hover:text-white transition-colors">
+                      {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                    </button>
+                    <input
+                      type="range" min={0} max={100} value={isMuted ? 0 : volume}
+                      onChange={e => { setVolume(+e.target.value); setIsMuted(false); }}
+                      className="flex-1 h-1 accent-emerald-500 cursor-pointer"
+                    />
+                    <span className="text-[10px] text-gray-500 font-mono w-6">{isMuted ? 0 : volume}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center text-gray-600">
+                  <Music2 size={48} className="mx-auto mb-4 opacity-30" />
+                  <p className="font-mono text-sm">Chọn một bài hát để phát</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Security Inspector — docked to bottom */}
+          <Inspector
+            events={inspectorEvents}
+            dpopThumbprint={dpopKeyPair?.thumbprint ?? null}
+            role={role}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function PlayerPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-emerald-400 font-mono text-sm">Đang khởi tạo Player...</p>
-        </div>
+      <div className="flex h-screen bg-black items-center justify-center text-emerald-400 font-mono text-sm gap-3">
+        <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+        Đang tải player...
       </div>
     }>
       <PlayerInner />

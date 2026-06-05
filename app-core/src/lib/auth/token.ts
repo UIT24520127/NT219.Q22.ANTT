@@ -1,91 +1,75 @@
 // lib/auth/token.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper dùng chung cho login/register page và bất kỳ component nào cần token.
-// ─────────────────────────────────────────────────────────────────────────────
+// Token được lưu trong HttpOnly Cookie — JS không đọc được trực tiếp.
+// Mọi thao tác với token đều thông qua API route server-side.
 
 export interface JWTPayload {
-    sub: string;
-    email?: string;
-    preferred_username?: string;
-    exp: number;
-    iat: number;
-    [key: string]: unknown;
+  sub: string;
+  email?: string;
+  preferred_username?: string;
+  realm_access?: { roles: string[] };
+  exp: number;
+  iat: number;
+  [key: string]: unknown;
+}
+
+// ── Decode JWT (chỉ dùng với token server trả về trực tiếp, ví dụ khi login) ──
+export function decodeJWT(token: string): JWTPayload | null {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    return JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+  } catch {
+    return null;
   }
-  
-  // ── Decode JWT (không verify signature — chỉ dùng client-side) ───────────────
-  export function decodeJWT(token: string): JWTPayload | null {
-    try {
-      const part = token.split('.')[1];
-      if (!part) return null;
-      const json = atob(part.replace(/-/g, '+').replace(/_/g, '/'));
-      return JSON.parse(json) as JWTPayload;
-    } catch {
-      return null;
+}
+
+// ── Lấy thông tin user hiện tại từ server ─────────────────────────────────────
+// Server đọc HttpOnly cookie, verify với Keycloak JWKS, trả payload.
+export async function getCurrentUser(): Promise<JWTPayload | null> {
+  try {
+    let res = await fetch('/api/auth/me', { credentials: 'include' });
+    if (res.status === 401) {
+      const refreshed = await refreshAccessToken();
+      if (!refreshed) return null;
+      res = await fetch('/api/auth/me', { credentials: 'include' });
     }
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
   }
-  
-  // ── Kiểm tra token còn hạn không (buffer 30s) ────────────────────────────────
-  export function isTokenExpired(token: string): boolean {
-    const payload = decodeJWT(token);
-    if (!payload) return true;
-    return payload.exp * 1000 < Date.now() + 30_000;
+}
+
+// ── Lấy role từ user payload ──────────────────────────────────────────────────
+export function getRoleFromPayload(payload: JWTPayload | null): string | null {
+  const roles = payload?.realm_access?.roles ?? [];
+  if (roles.includes('music_uploader')) return 'music_uploader';
+  if (roles.includes('music_listener')) return 'music_listener';
+  return null;
+}
+
+// ── Redirect URL theo role ────────────────────────────────────────────────────
+export function getRedirectByRole(role: string | null): string {
+  if (role === 'music_uploader') return '/upload';
+  if (role === 'music_listener') return '/player';
+  return '/login';
+}
+
+// ── Trigger refresh — server tự đọc refresh_token cookie ─────────────────────
+export async function refreshAccessToken(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
-  
-  // ── Lấy token từ localStorage ─────────────────────────────────────────────────
-  export function getStoredToken(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('token');
-  }
-  
-  export function getStoredRefreshToken(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('refresh_token');
-  }
-  
-  // ── Lưu token vào localStorage ────────────────────────────────────────────────
-  export function storeTokens(accessToken: string, refreshToken?: string) {
-    localStorage.setItem('token', accessToken);
-    if (refreshToken) localStorage.setItem('refresh_token', refreshToken);
-  }
-  
-  // ── Xóa token (logout) ────────────────────────────────────────────────────────
-  export function clearTokens() {
-    localStorage.removeItem('token');
-    localStorage.removeItem('refresh_token');
-  }
-  
-  // ── Tự động refresh token khi gần hết hạn ────────────────────────────────────
-  // Gọi API /api/auth/refresh, cập nhật localStorage.
-  // Trả về access token mới, hoặc null nếu refresh thất bại.
-  export async function refreshAccessToken(): Promise<string | null> {
-    const refreshToken = getStoredRefreshToken();
-    if (!refreshToken) return null;
-  
-    try {
-      const res = await fetch('/api/auth/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-  
-      if (!res.ok) {
-        clearTokens();
-        return null;
-      }
-  
-      const data = await res.json();
-      storeTokens(data.access_token, data.refresh_token);
-      return data.access_token;
-    } catch {
-      return null;
-    }
-  }
-  
-  // ── Lấy token hợp lệ (tự refresh nếu cần) ────────────────────────────────────
-  // Dùng thay thế getStoredToken() ở mọi nơi cần gọi API.
-  export async function getValidToken(): Promise<string | null> {
-    const token = getStoredToken();
-    if (!token) return null;
-    if (!isTokenExpired(token)) return token;
-    return refreshAccessToken();
-  }
+}
+
+// ── Logout — server xóa cookie ────────────────────────────────────────────────
+export async function logout(): Promise<void> {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+  window.location.href = '/login';
+}

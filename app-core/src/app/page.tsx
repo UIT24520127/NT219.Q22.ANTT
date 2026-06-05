@@ -19,6 +19,7 @@ export default function HomePage() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [tracks, setTracks] = useState<TrackItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -26,23 +27,34 @@ export default function HomePage() {
 
     const fetchAllTracks = async () => {
       try {
-        // Gọi API danh sách — không truyền trackId để lấy tất cả
-        const res = await fetch('/api/ingest/upload');
-        if (res.ok) {
-          const json = await res.json();
-          // Hỗ trợ cả hai dạng response: { data: [tracks] } hoặc { data: { tracks: [] } }
-          const list: TrackItem[] =
-            Array.isArray(json.data)
-              ? json.data
-              : Array.isArray(json.data?.tracks)
-              ? json.data.tracks
-              : json.data?.track
-              ? [json.data.track]
-              : [];
-          setTracks(list);
+        const res = await fetch('/api/tracks');
+
+        if (!res.ok) {
+          setFetchError(`Lỗi server: HTTP ${res.status}`);
+          return;
         }
-      } catch (error) {
-        console.error('⚠️ Không thể tải danh sách bài hát:', error);
+
+        const json = await res.json();
+
+        // API /api/tracks (không có trackId) trả: { success: true, data: TrackItem[] }
+        // Fallback thêm cho các shape khác phòng API thay đổi
+        let list: TrackItem[] = [];
+        if (Array.isArray(json.data)) {
+          list = json.data;
+        } else if (Array.isArray(json.data?.tracks)) {
+          list = json.data.tracks;
+        } else if (json.data?.track) {
+          list = [json.data.track];
+        }
+
+        // Lọc bỏ bản ghi thiếu id (tránh crash khi render)
+        list = list.filter((t) => t && t.id);
+
+        setTracks(list);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        console.error('⚠️ Không thể tải danh sách bài hát:', msg);
+        setFetchError(msg);
       } finally {
         setIsLoading(false);
       }
@@ -105,7 +117,7 @@ export default function HomePage() {
               <Upload size={16} />
               <span className="hidden sm:inline">Upload</span>
             </button>
-            {/* DPoP indicator — chỉ hiện khi đã đăng nhập */}
+            {/* DPoP indicator */}
             {isLoggedIn && (
               <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-900/40 px-2.5 py-1 rounded-full">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
@@ -138,6 +150,11 @@ export default function HomePage() {
               <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
               Đang đồng bộ danh sách bài hát mã hóa...
             </div>
+          ) : fetchError ? (
+            <div className="p-8 bg-red-950/30 border border-red-900/50 rounded-xl text-center font-mono">
+              <p className="text-sm text-red-400 mb-1">⚠️ Không thể tải danh sách bài hát</p>
+              <p className="text-xs text-red-700">{fetchError}</p>
+            </div>
           ) : tracks.length === 0 ? (
             <div className="p-8 bg-gray-900/40 border border-gray-800 rounded-xl text-center text-sm text-gray-500 font-mono">
               ⚠️ Hệ thống chưa ghi nhận bản nhạc nào. Vui lòng chạy luồng Ingest trước!
@@ -163,14 +180,15 @@ export default function HomePage() {
                   </div>
 
                   <h3 className="font-bold text-sm text-white truncate mb-1 pr-2">
-                    {track.filename}
+                    {track.filename ?? '(không có tên)'}
                   </h3>
                   <p className="text-[11px] text-gray-400 font-mono truncate mb-2">
-                    KID: {track.kid.substring(0, 8)}...
+                    {/* Guard: kid có thể null nếu track chưa được ingest đầy đủ */}
+                    KID: {track.kid ? track.kid.substring(0, 8) + '...' : 'N/A'}
                   </p>
 
                   <div className="flex items-center justify-between mt-3 pt-2 border-t border-gray-900 text-[10px] text-gray-500 font-mono">
-                    <span>⏱️ {Math.floor(track.duration / 60)}m {track.duration % 60}s</span>
+                    <span>⏱️ {Math.floor((track.duration ?? 0) / 60)}m {(track.duration ?? 0) % 60}s</span>
                   </div>
                 </div>
               ))}

@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
 
-  # 1. MariaDB — db-subnet internal, không expose ra ngoài
+  # 1. MariaDB — giữ nguyên
   db:
     image: mariadb:10.11
     container_name: drm_mariadb
@@ -21,13 +21,11 @@ services:
       retries: 5
       start_period: 30s
 
-  # 2. OpenBao KMS — HTTP thuần, private-subnet đủ bảo mật
+  # 2. OpenBao KMS — giữ nguyên
   openbao:
     image: quay.io/openbao/openbao:2.0
     container_name: drm_kms
     environment:
-      # VAULT_TOKEN chỉ dùng bởi bao CLI bên trong container (setup-bao.sh)
-      # KHÔNG truyền BAO_DEV_ROOT_TOKEN_ID — sẽ override sang dev mode, mất file storage
       VAULT_TOKEN: ${BAO_PRODUCTION_TOKEN}
       BAO_ADDR: "http://0.0.0.0:8200"
     volumes:
@@ -36,26 +34,22 @@ services:
     command: server -config=/vault/config/bao-config.hcl
     networks:
       - private-subnet
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -qO- http://localhost:8200/v1/sys/health | grep -q sealed || true"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 10
-    #   start_period: 20s
 
-  # 3. Keycloak
+  # 3. Keycloak — đổi KC_HOSTNAME sang localhost
   keycloak:
     image: quay.io/keycloak/keycloak:latest
     container_name: drm_auth
     ports:
-      - "8080:8080"
+      - "8080:8080"           # giữ expose để debug trực tiếp nếu cần
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
-      KC_HOSTNAME: ${DOMAIN}
+      #KC_HOSTNAME: localhost
+      KC_HOSTNAME_URL: "http://keycloak:8080"
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
-      KC_PROXY: edge
+      #KC_PROXY: edge
+      KC_PROXY_HEADERS: "xforwarded"
       KC_DB: mariadb
       KC_DB_URL: jdbc:mariadb://db:3306/keycloak
       KC_DB_USERNAME: root
@@ -63,18 +57,12 @@ services:
       KC_DB_SCHEMA: keycloak
     volumes:
       - ./realm-export.json:/opt/keycloak/data/import/realm.json:ro
-    command: start-dev --import-realm
+    command: start --import-realm
     networks:
       - private-subnet
       - db-subnet
-    # healthcheck:
-    #   test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
-    #   interval: 15s
-    #   timeout: 10s
-    #   retries: 10
-    #   start_period: 90s
 
-  # 4. Next.js App
+  # 4. Next.js App — đổi APP_URL và KEYCLOAK_ISSUER sang localhost
   app:
     build:
       context: ./app-core
@@ -85,7 +73,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      # Database
       DB_HOST: db
       DB_PORT: 3306
       DB_USER: root
@@ -93,13 +80,11 @@ services:
       DB_NAME: drm_system
       DATABASE_URL: "mysql://root:${DB_ROOT_PASSWORD}@db:3306/drm_system"
 
-      # OpenBao KMS
       BAO_ADDR: "http://openbao:8200"
       BAO_DEV_ROOT_TOKEN_ID: ${BAO_PRODUCTION_TOKEN}
       KMS_TRANSIT_KEY_NAME: "music-app-key"
 
-      # Keycloak
-      KEYCLOAK_ISSUER: "http://keycloak:8080/realms/drm-realm"
+      KEYCLOAK_ISSUER: "http://keycloak:8080/realms/drm-realm"   # internal docker — giữ nguyên
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
       KEYCLOAK_SECRET: ${KEYCLOAK_SECRET}
       KEYCLOAK_FRONTEND_CLIENT_ID: "frontend-client"
@@ -108,10 +93,8 @@ services:
       KEYCLOAK_DPOP_PRIVATE_JWK: ${KEYCLOAK_DPOP_PRIVATE_JWK}
       DPOP_MAX_AGE: ${DPOP_MAX_AGE:-120}
 
-      # App
-      APP_URL: "https://${DOMAIN}"
+      APP_URL: "https://localhost"   # ← đổi từ https://${DOMAIN}
 
-      # Cloudflare R2
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
       R2_BUCKET_NAME: ${R2_BUCKET_NAME}
       R2_REGION: auto
@@ -129,10 +112,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      # openbao:
-      #   condition: service_healthy
-      # keycloak:
-      #   condition: service_healthy
+      # openbao và keycloak chưa có healthcheck — fix sau
 
     networks:
       - private-subnet
@@ -145,7 +125,7 @@ services:
       retries: 3
       start_period: 40s
 
-  # 5. Nginx — cổng duy nhất ra internet
+  # 5. Nginx — mount cert từ project thay vì /etc/nginx/ssl/
   nginx:
     image: nginx:latest
     container_name: drm_nginx
@@ -154,8 +134,8 @@ services:
       - "443:443"
     volumes:
       - ./security/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/nginx/ssl/cert.pem:/etc/nginx/ssl/cert.pem:ro
-      - /etc/nginx/ssl/key.pem:/etc/nginx/ssl/key.pem:ro
+      - ./security/certificates/certs/cert.pem:/etc/nginx/ssl/cert.pem:ro   # ← local path
+      - ./security/certificates/certs/key.pem:/etc/nginx/ssl/key.pem:ro     # ← local path
     depends_on:
       app:
         condition: service_healthy
@@ -168,7 +148,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # 6. Prometheus
+  # 6. Prometheus — giữ nguyên
   prometheus:
     image: prom/prometheus:latest
     container_name: drm_prometheus
@@ -186,14 +166,13 @@ services:
     networks:
       - private-subnet
 
-  # 7. Grafana
+  # 7. Grafana — giữ nguyên
   grafana:
     image: grafana/grafana:latest
     container_name: drm_grafana
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_INSTALL_PLUGINS: grafana-clock-panel
-      #GF_SERVER_ROOT_URL: "http://${DOMAIN}/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     ports:
       - "3001:3000"

@@ -2,23 +2,47 @@
 // app/register/page.tsx
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ShieldCheck, Mail, User, Lock, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import {
+  ShieldCheck, Mail, User, Lock,
+  AlertCircle, CheckCircle2, Loader2,
+  Headphones, Mic2,
+} from 'lucide-react';
+
+type Role = 'music_listener' | 'music_uploader';
+
+const ROLES: { value: Role; label: string; desc: string; icon: React.ReactNode; color: string }[] = [
+  {
+    value: 'music_listener',
+    label: 'Music Listener',
+    desc:  'Nghe nhạc được mã hóa DRM',
+    icon:  <Headphones className="w-5 h-5" />,
+    color: 'emerald',
+  },
+  {
+    value: 'music_uploader',
+    label: 'Music Uploader',
+    desc:  'Upload & quản lý bản nhạc',
+    icon:  <Mic2 className="w-5 h-5" />,
+    color: 'blue',
+  },
+];
 
 function RegisterInner() {
   const router = useRouter();
 
-  const [username, setUsername]               = useState('');
-  const [email, setEmail]                     = useState('');
-  const [password, setPassword]               = useState('');
+  const [username,        setUsername]        = useState('');
+  const [email,           setEmail]           = useState('');
+  const [password,        setPassword]        = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [loading, setLoading]                 = useState(false);
-  const [error, setError]                     = useState<string | null>(null);
-  const [success, setSuccess]                 = useState(false);
+  const [role,            setRole]            = useState<Role | null>(null);
+  const [loading,         setLoading]         = useState(false);
+  const [error,           setError]           = useState<string | null>(null);
+  const [success,         setSuccess]         = useState(false);
 
-  // ── Inline validation ─────────────────────────────────────────────────────
+  // ── Validation ────────────────────────────────────────────────────────────
   const passwordMismatch = confirmPassword.length > 0 && password !== confirmPassword;
   const passwordWeak     = password.length > 0 && password.length < 8;
-  const canSubmit        = username && email && password && confirmPassword
+  const canSubmit        = username && email && password && confirmPassword && role
                            && !passwordMismatch && !passwordWeak && !loading;
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -29,16 +53,15 @@ function RegisterInner() {
 
     try {
       const res = await fetch('/api/auth/register', {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password }),
+        body:    JSON.stringify({ username, email, password, role }),
       });
 
       const data = await res.json();
 
       if (res.ok) {
         setSuccess(true);
-        // Tự chuyển sang login sau 2 giây
         setTimeout(() => router.push('/login'), 2000);
       } else if (res.status === 409) {
         setError('Tên đăng nhập hoặc email đã tồn tại.');
@@ -62,8 +85,11 @@ function RegisterInner() {
           <div className="w-16 h-16 mx-auto mb-4 bg-emerald-950 border border-emerald-700 rounded-2xl flex items-center justify-center">
             <CheckCircle2 className="w-9 h-9 text-emerald-400" />
           </div>
-          <h2 className="text-xl font-bold mb-2">Đăng ký thành công!</h2>
-          <p className="text-gray-400 text-sm">Đang chuyển sang trang đăng nhập...</p>
+          <h2 className="text-xl font-bold mb-1">Đăng ký thành công!</h2>
+          <p className="text-sm text-gray-400 mb-1">
+            Role: <span className="text-emerald-400 font-mono font-bold">{role}</span>
+          </p>
+          <p className="text-gray-500 text-sm">Đang chuyển sang trang đăng nhập...</p>
           <div className="mt-4 flex justify-center">
             <Loader2 className="w-5 h-5 text-emerald-500 animate-spin" />
           </div>
@@ -73,11 +99,11 @@ function RegisterInner() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white px-4 py-8">
       <div className="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-sm border border-gray-700">
 
         {/* Header */}
-        <div className="text-center mb-8">
+        <div className="text-center mb-7">
           <div className="w-16 h-16 mx-auto mb-4 bg-blue-950 border border-blue-800 rounded-2xl flex items-center justify-center">
             <ShieldCheck className="w-9 h-9 text-blue-400" />
           </div>
@@ -92,7 +118,6 @@ function RegisterInner() {
           </div>
         )}
 
-        {/* Form */}
         <form className="flex flex-col gap-3" onSubmit={handleRegister}>
 
           {/* Username */}
@@ -144,7 +169,9 @@ function RegisterInner() {
                 disabled={loading}
                 className={`w-full bg-gray-900 border rounded-lg p-3 pl-9 text-white text-sm
                            placeholder-gray-500 focus:outline-none transition-colors disabled:opacity-50
-                           ${passwordWeak ? 'border-amber-600 focus:border-amber-500' : 'border-gray-600 focus:border-blue-500'}`}
+                           ${passwordWeak
+                             ? 'border-amber-600 focus:border-amber-500'
+                             : 'border-gray-600 focus:border-blue-500'}`}
               />
             </div>
             {passwordWeak && (
@@ -166,7 +193,9 @@ function RegisterInner() {
                 disabled={loading}
                 className={`w-full bg-gray-900 border rounded-lg p-3 pl-9 text-white text-sm
                            placeholder-gray-500 focus:outline-none transition-colors disabled:opacity-50
-                           ${passwordMismatch ? 'border-red-600 focus:border-red-500' : 'border-gray-600 focus:border-blue-500'}`}
+                           ${passwordMismatch
+                             ? 'border-red-600 focus:border-red-500'
+                             : 'border-gray-600 focus:border-blue-500'}`}
               />
             </div>
             {passwordMismatch && (
@@ -174,18 +203,61 @@ function RegisterInner() {
             )}
           </div>
 
+          {/* Role picker */}
+          <div className="mt-1">
+            <p className="text-xs text-gray-500 font-mono uppercase tracking-widest mb-2">
+              Chọn vai trò <span className="text-red-400">*</span>
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {ROLES.map(r => {
+                const selected = role === r.value;
+                const colorMap = {
+                  emerald: selected
+                    ? 'border-emerald-500 bg-emerald-950/50 text-emerald-400'
+                    : 'border-gray-700 hover:border-emerald-800 text-gray-400 hover:text-emerald-400',
+                  blue: selected
+                    ? 'border-blue-500 bg-blue-950/50 text-blue-400'
+                    : 'border-gray-700 hover:border-blue-800 text-gray-400 hover:text-blue-400',
+                };
+                return (
+                  <button
+                    key={r.value}
+                    type="button"
+                    disabled={loading}
+                    onClick={() => setRole(r.value)}
+                    className={`flex flex-col items-center gap-2 p-3.5 rounded-xl border transition-all duration-150
+                               disabled:opacity-50 disabled:cursor-not-allowed
+                               ${colorMap[r.color as 'emerald' | 'blue']}`}
+                  >
+                    {r.icon}
+                    <span className="text-xs font-bold leading-tight text-center">{r.label}</span>
+                    <span className="text-[10px] text-gray-500 leading-tight text-center">{r.desc}</span>
+                    {selected && (
+                      <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded-full
+                        ${r.color === 'emerald'
+                          ? 'bg-emerald-900/60 text-emerald-400'
+                          : 'bg-blue-900/60 text-blue-400'}`}>
+                        ✓ Đã chọn
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {!role && (
+              <p className="text-gray-600 text-[10px] font-mono mt-1.5 ml-1">Vui lòng chọn vai trò để tiếp tục.</p>
+            )}
+          </div>
+
           <button
             type="submit"
             disabled={!canSubmit}
             className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500
-                       p-3 rounded-lg font-semibold text-sm transition-all mt-1
+                       p-3 rounded-lg font-semibold text-sm transition-all mt-2
                        disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {loading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Đang tạo tài khoản...
-              </>
+              <><Loader2 className="w-4 h-4 animate-spin" /> Đang tạo tài khoản...</>
             ) : 'Đăng ký tài khoản'}
           </button>
         </form>

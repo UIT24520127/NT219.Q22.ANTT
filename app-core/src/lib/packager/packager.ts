@@ -84,7 +84,7 @@ export const encryptAndPackageMedia = async (
     path.dirname(inputPath),
     `${path.basename(inputPath, path.extname(inputPath))}.watermarked${path.extname(inputPath)}`,
   );
-  const packagingInputPath = await applyAudioWatermark(inputPath, watermarkedInputPath);
+  const packagingInputPath = await applyAudioWatermark(inputPath, watermarkedInputPath, trackId);
 
   const initSegmentPath = path.join(outputDir, 'init.mp4');
   const segmentTemplate = path.join(outputDir, 'segment_$Number$.m4s');

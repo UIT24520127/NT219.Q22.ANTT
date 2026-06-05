@@ -1,449 +1,347 @@
 "use client";
+// app/upload/page.tsx
+// Middleware đã chặn nếu không có role music_uploader
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useRef } from 'react';
-import { Upload, AlertCircle, CheckCircle, ArrowLeft, Loader2 } from 'lucide-react';
+import { Upload, CheckCircle2, AlertCircle, Loader2, Music2, FileAudio, LogOut } from 'lucide-react';
+import { getCurrentUser, getRoleFromPayload, logout, type JWTPayload } from '@/lib/auth/token';
 
 interface UploadedTrack {
-  trackId: string;
-  kid: string;
-  filename: string;
-  duration: number;
-  mpdPath: string;
-  segmentDir: string;
-  bitrate: number;
+  id:        string;
+  filename:  string;
+  duration:  number;
+  kid:       string;
   createdAt: string;
 }
 
-const ALLOWED_EXTENSIONS = ['.m4a', '.aac', '.mp4'];
+type UploadStatus = 'idle' | 'uploading' | 'success' | 'error';
 
-// DPoP keypair kept for the lifetime of the tab
-let globalDPoPKeyPair: CryptoKeyPair | null = null;
-let globalDPoPPublicJWK: JsonWebKey | null = null;
+function Sidebar({ role, currentPath }: { role: string | null; currentPath: string }) {
+  const router = useRouter();
+  const links = [
+    { icon: '🏠', label: 'Trang chủ', href: '/',       roles: null },
+    { icon: '⬆️', label: 'Upload',    href: '/upload',  roles: ['music_uploader'] },
+  ];
 
-function base64urlEncode(buf: ArrayBuffer | Uint8Array): string {
-  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let binary = '';
-  bytes.forEach(b => (binary += String.fromCharCode(b)));
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
+  return (
+    <div className="w-64 bg-black p-6 hidden md:flex flex-col gap-8 border-r border-gray-900 shrink-0">
+      <div className="text-2xl font-bold tracking-tighter flex items-center gap-2">
+        <span className="text-emerald-500 text-3xl">♪</span> UITify
+      </div>
+      {role && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-gray-500 font-mono uppercase tracking-widest">Đăng nhập là</span>
+          <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full w-fit bg-violet-950/60 border border-violet-800/40 text-violet-400">
+            🎙 Music Uploader
+          </span>
+        </div>
+      )}
+      <nav className="flex flex-col gap-2">
+        {links.map((link) => {
+          const canAccess = !link.roles || (role && link.roles.includes(role));
+          return (
+            <button
+              key={link.href}
+              onClick={() => canAccess ? router.push(link.href) : undefined}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold text-left w-full transition-colors
+                ${currentPath === link.href ? 'text-white bg-gray-800' : ''}
+                ${canAccess
+                  ? 'text-gray-400 hover:text-white hover:bg-gray-900 cursor-pointer'
+                  : 'text-gray-600 cursor-not-allowed opacity-50'}`}
+            >
+              <span>{link.icon}</span>
+              <span>{link.label}</span>
+            </button>
+          );
+        })}
+      </nav>
 
-async function createDPoPProof(htm: string, htu: string, accessToken: string): Promise<string> {
-  if (!globalDPoPKeyPair || !globalDPoPPublicJWK) throw new Error('DPoP keypair chưa khởi tạo');
-  const ath = base64urlEncode(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(accessToken))
+      {/* Logout ở cuối sidebar */}
+      <div className="mt-auto">
+        <button
+          onClick={() => logout()}
+          className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-red-400
+                     hover:bg-red-950/30 hover:text-red-300 transition-colors"
+        >
+          <LogOut size={14} /> Đăng xuất
+        </button>
+      </div>
+    </div>
   );
-  const header = { alg: 'ES256', typ: 'dpop+jwt', jwk: globalDPoPPublicJWK };
-  const payload: any = {
-    jti: crypto.randomUUID(),
-    htm: htm.toUpperCase(),
-    htu: htu.replace(/\/$/, ''),
-    iat: Math.floor(Date.now() / 1000),
-    ath,
-  };
-  const sigInput =
-    `${base64urlEncode(new TextEncoder().encode(JSON.stringify(header)))}` +
-    `.${base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)))}`;
-  const sig = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    globalDPoPKeyPair.privateKey,
-    new TextEncoder().encode(sigInput)
-  );
-  return `${sigInput}.${base64urlEncode(sig)}`;
 }
 
 export default function UploadPage() {
   const router = useRouter();
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const [user, setUser]                   = useState<JWTPayload | null>(null);
+  const [role, setRole]                   = useState<string | null>(null);
+  const [file, setFile]                   = useState<File | null>(null);
+  const [status, setStatus]               = useState<UploadStatus>('idle');
   const [uploadedTrack, setUploadedTrack] = useState<UploadedTrack | null>(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [errorMsg, setErrorMsg]           = useState('');
+  const [isDragOver, setIsDragOver]       = useState(false);
+  const [uploadedList, setUploadedList]   = useState<UploadedTrack[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Auth guard
+  // Xác thực user — double-check client side (middleware là lớp 1)
   useEffect(() => {
-    const returnUrl = '/upload';
-    (async () => {
-      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
-      const token = await getValidToken();
-      if (!token) {
-        clearTokens();
-        router.replace(`/login?returnTo=${encodeURIComponent(returnUrl)}`);
-        return;
-      }
-      // ensure DPoP keypair exists for this tab
-      if (!globalDPoPKeyPair) {
-        globalDPoPKeyPair = await crypto.subtle.generateKey(
-          { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
-        );
-        globalDPoPPublicJWK = await crypto.subtle.exportKey('jwk', globalDPoPKeyPair.publicKey);
-        if (globalDPoPPublicJWK && 'd' in globalDPoPPublicJWK) delete (globalDPoPPublicJWK as any).d;
-      }
-      setIsLoggedIn(true);
-    })();
+    getCurrentUser().then((u) => {
+      if (!u) { router.replace('/login'); return; }
+      const r = getRoleFromPayload(u);
+      if (r !== 'music_uploader') { router.replace('/403'); return; }
+      setUser(u);
+      setRole(r);
+    });
   }, [router]);
 
-  const validateFile = (file: File): string | null => {
-    // Check file extension
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-    if (!ALLOWED_EXTENSIONS.includes(ext)) {
-      return `Only .m4a, .aac, and .mp4 files are supported. Got: ${ext}`;
-    }
+  useEffect(() => {
+    if (!role) return;
+    fetch('/api/tracks', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(json => {
+        if (!json?.data) return;
+        const list: UploadedTrack[] = Array.isArray(json.data) ? json.data : [];
+        setUploadedList(list);
+      })
+      .catch(() => {});
+  }, [role, uploadedTrack]);
 
-    // Check file size (100MB limit)
-    const maxSize = 100 * 1024 * 1024;
-    if (file.size > maxSize) {
-      return `File size must be less than 100MB. Your file is ${(file.size / (1024 * 1024)).toFixed(2)}MB`;
-    }
-
-    return null;
-  };
-
-  const handleFileSelect = (file: File) => {
-    const validationError = validateFile(file);
-    if (validationError) {
-      setError(validationError);
-      setSelectedFile(null);
+  const handleFile = (f: File) => {
+    if (!f.type.startsWith('audio/') && f.type !== 'video/mp4') {
+      setErrorMsg('Chỉ chấp nhận file âm thanh (aac, m4a, mp4...)');
       return;
     }
-    setError(null);
-    setSelectedFile(file);
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      handleFileSelect(files[0]);
-    }
-  };
-
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.currentTarget.files;
-    if (files && files.length > 0) {
-      handleFileSelect(files[0]);
-    }
+    setFile(f);
+    setStatus('idle');
+    setErrorMsg('');
+    setUploadedTrack(null);
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) return;
-
-    setIsUploading(true);
-    setError(null);
-    setUploadProgress(0);
+    if (!file) return;
+    setStatus('uploading');
+    setErrorMsg('');
 
     try {
-      const formData = new FormData();
-      formData.append('audio', selectedFile);
+      // ── Tạo DPoP proof cho upload endpoint ───────────────────────────────
+      // Import jose dynamic để chạy phía client
+      const jose = await import('jose');
 
-      const xhr = new XMLHttpRequest();
+      const { privateKey, publicKey } = await jose.generateKeyPair('ES256', { extractable: true });
+      const publicJwk = await jose.exportJWK(publicKey);
 
-      // Track upload progress
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const percentComplete = Math.round((e.loaded / e.total) * 100);
-          setUploadProgress(percentComplete);
-        }
-      });
-
-      // Handle completion
-      xhr.addEventListener('load', () => {
-        if (xhr.status === 201) {
-          try {
-            const response = JSON.parse(xhr.responseText);
-            if (response.success && response.data) {
-              setUploadedTrack(response.data);
-              setSelectedFile(null);
-            } else {
-              setError('Upload failed: ' + (response.message || 'Unknown error'));
-            }
-          } catch (e) {
-            setError('Failed to parse response');
-          }
-        } else {
-          try {
-            const response = JSON.parse(xhr.responseText);
-            setError(response.message || `Upload failed with status ${xhr.status}`);
-          } catch {
-            setError(`Upload failed with status ${xhr.status}`);
-          }
-        }
-        setIsUploading(false);
-      });
-
-      // Handle error
-      xhr.addEventListener('error', () => {
-        setError('Network error during upload');
-        setIsUploading(false);
-      });
-
-      // Handle abort
-      xhr.addEventListener('abort', () => {
-        setError('Upload cancelled');
-        setIsUploading(false);
-      });
-
-      const { getValidToken, clearTokens } = await import('@/lib/auth/token');
       const uploadUrl = `${window.location.origin}/api/ingest/upload`;
-      const token = await getValidToken();
-      if (!token) {
-        clearTokens();
-        router.replace('/login?returnTo=/upload');
+
+      // Đọc ath từ cookie dpop_ath (non-HttpOnly, set lúc login)
+      const ath = document.cookie
+        .split('; ')
+        .find(c => c.startsWith('dpop_ath='))
+        ?.split('=')[1];
+
+      if (!ath) {
+        setStatus('error');
+        setErrorMsg('Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.');
         return;
       }
 
-      // create DPoP proof bound to this tab and the upload endpoint
-      let dpopProof: string | null = null;
-      try {
-        dpopProof = await createDPoPProof('POST', uploadUrl, token);
-      } catch (e) {
-        console.warn('DPoP creation failed, proceeding without DPoP:', e);
+      const dpopProof = await new jose.SignJWT({
+        jti: crypto.randomUUID(),
+        htm: 'POST',
+        htu: uploadUrl,
+        ath,
+      })
+        .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk: publicJwk })
+        .setIssuedAt()
+        .setExpirationTime('2m')
+        .sign(privateKey);
+
+      // ── Gửi file kèm DPoP proof ───────────────────────────────────────────
+      const formData = new FormData();
+      formData.append('audio', file);   // field name 'audio' khớp với route
+
+      const res = await fetch('/api/ingest/upload', {
+        method:      'POST',
+        credentials: 'include',         // gửi kèm HttpOnly cookie
+        headers:     { 'DPoP': dpopProof },
+        body:        formData,
+      });
+
+      const json = await res.json();
+
+      if (!res.ok) {
+        setStatus('error');
+        setErrorMsg(json.error || `Lỗi ${res.status}`);
+        return;
       }
 
-      xhr.open('POST', '/api/ingest/upload');
-      try { xhr.setRequestHeader('Authorization', `Bearer ${token}`); } catch {}
-      if (dpopProof) {
-        try { xhr.setRequestHeader('DPoP', dpopProof); } catch {}
-      }
-      xhr.send(formData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setIsUploading(false);
+      const track: UploadedTrack = {
+        id:        json.data.trackId,
+        filename:  json.data.filename,
+        duration:  json.data.duration ?? 0,
+        kid:       json.data.kid,
+        createdAt: json.data.createdAt,
+      };
+
+      setUploadedTrack(track);
+      setStatus('success');
+      setFile(null);
+
+    } catch (err: any) {
+      setStatus('error');
+      setErrorMsg(err.message || 'Lỗi kết nối');
     }
   };
 
-  const handleUploadAnother = () => {
-    setSelectedFile(null);
-    setUploadedTrack(null);
-    setUploadProgress(0);
-    setError(null);
-    fileInputRef.current?.click();
-  };
-
-  if (!isLoggedIn) {
-    return (
-      <div className="flex h-screen bg-black text-white items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="animate-spin mx-auto mb-4" size={40} />
-          <p className="text-gray-400">Checking authentication...</p>
-        </div>
-      </div>
-    );
-  }
+  const fmt = (s: number) => `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
 
   return (
-    <div className="flex h-screen bg-black text-white font-sans overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-64 bg-black p-6 hidden md:flex flex-col gap-8 border-r border-gray-950">
-        <div className="text-2xl font-bold tracking-tighter flex items-center gap-2">
-          <span className="text-emerald-500 text-3xl">♪</span> UITify
-        </div>
-        <div className="flex flex-col gap-5 text-gray-400 font-semibold text-sm">
-          <span className="text-white cursor-pointer flex items-center gap-4">
-            📤 Upload
-          </span>
-        </div>
-      </div>
+    <div className="flex h-screen bg-black text-white font-sans overflow-hidden select-none">
+      <Sidebar role={role} currentPath="/upload" />
 
-      {/* Main content */}
-      <div className="flex-1 bg-gradient-to-b from-gray-900 to-black overflow-y-auto rounded-lg m-2 relative">
+      <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-center gap-4 p-6 sticky top-0 bg-black/40 backdrop-blur-md z-10 border-b border-gray-900/50">
-          <button
-            onClick={() => router.push('/')}
-            className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
-          >
-            <ArrowLeft size={20} />
-            Back
-          </button>
-          <h1 className="text-2xl font-bold">Upload Audio</h1>
+        <div className="flex justify-between items-center px-6 py-4 border-b border-gray-900 bg-black/40 backdrop-blur-md">
+          <h1 className="text-lg font-bold flex items-center gap-2">
+            <Upload size={20} className="text-emerald-500" /> Upload nhạc
+          </h1>
+          <div className="flex items-center gap-3">
+            {user && (
+              <span className="text-xs text-gray-400 font-mono">
+                {(user as any).preferred_username}
+              </span>
+            )}
+            <span className="hidden sm:flex items-center gap-1.5 text-[10px] font-mono text-emerald-400
+                             bg-emerald-950/40 border border-emerald-900/40 px-2.5 py-1 rounded-full">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
+              DPoP Active
+            </span>
+          </div>
         </div>
 
-        {/* Content */}
-        <div className="p-8 max-w-2xl mx-auto">
-          {uploadedTrack ? (
-            // Success state
-            <div className="space-y-6">
-              <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-xl p-8 text-center">
-                <CheckCircle className="mx-auto mb-4 text-emerald-500" size={48} />
-                <h2 className="text-2xl font-bold text-emerald-400 mb-2">Upload Successful!</h2>
-                <p className="text-gray-400 mb-6">Your audio file has been processed and stored securely.</p>
+        <div className="flex-1 overflow-y-auto p-8 bg-gradient-to-b from-gray-900 to-black">
+          <div className="max-w-2xl mx-auto flex flex-col gap-6">
 
-                {/* Track details */}
-                <div className="bg-black/50 rounded-lg p-6 text-left space-y-3 mb-6">
-                  <div>
-                    <p className="text-gray-500 text-sm">Filename</p>
-                    <p className="text-white font-mono break-all">{uploadedTrack.filename}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Track ID</p>
-                    <p className="text-white font-mono break-all text-sm">{uploadedTrack.trackId}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Duration</p>
-                    <p className="text-white">{Math.round(uploadedTrack.duration)} seconds</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Bitrate</p>
-                    <p className="text-white">{uploadedTrack.bitrate} kbps</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">KID (Key ID)</p>
-                    <p className="text-white font-mono break-all text-sm">{uploadedTrack.kid}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Created At</p>
-                    <p className="text-white">{new Date(uploadedTrack.createdAt).toLocaleString()}</p>
-                  </div>
-                </div>
-
-                {/* Action buttons */}
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <button
-                    onClick={handleUploadAnother}
-                    className="flex-1 bg-emerald-500 text-white px-6 py-3 rounded-full font-bold hover:bg-emerald-600 transition-all duration-200"
-                  >
-                    Upload Another
-                  </button>
-                  <button
-                    onClick={() => router.push('/')}
-                    className="flex-1 bg-gray-800 text-white px-6 py-3 rounded-full font-bold hover:bg-gray-700 transition-all duration-200"
-                  >
-                    Back to Home
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            // Upload form
-            <div className="space-y-6">
-              {/* Error message */}
-              {error && (
-                <div className="bg-red-950/30 border border-red-500/30 rounded-xl p-4 flex gap-3 items-start">
-                  <AlertCircle className="text-red-400 flex-shrink-0 mt-0.5" size={20} />
-                  <div>
-                    <p className="text-red-400 font-semibold">Error</p>
-                    <p className="text-red-300 text-sm">{error}</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Drag and drop area */}
-              <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all duration-200 ${
-                  isDragging
-                    ? 'border-emerald-500 bg-emerald-950/20'
-                    : 'border-gray-700 bg-gray-900/30 hover:border-gray-600 hover:bg-gray-900/50'
-                }`}
-              >
-                <Upload
-                  size={48}
-                  className={`mx-auto mb-4 transition-colors ${isDragging ? 'text-emerald-500' : 'text-gray-500'}`}
-                />
-                <h3 className="text-lg font-bold mb-2">
-                  {isDragging ? 'Drop your file here' : 'Drag and drop your audio file'}
-                </h3>
-                <p className="text-gray-400 mb-4">or click to select from your computer</p>
-                <p className="text-xs text-gray-600">Supported formats: .m4a, .aac, .mp4 (max 100MB)</p>
-              </div>
-
-              {/* Hidden file input */}
+            {/* Drop zone */}
+            <div
+              onDragOver={e => { e.preventDefault(); setIsDragOver(true); }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={e => { e.preventDefault(); setIsDragOver(false); const f = e.dataTransfer.files[0]; if (f) handleFile(f); }}
+              onClick={() => fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-2xl p-12 flex flex-col items-center justify-center gap-4 cursor-pointer transition-all duration-200
+                ${isDragOver
+                  ? 'border-emerald-500 bg-emerald-950/20'
+                  : file
+                  ? 'border-emerald-700 bg-emerald-950/10'
+                  : 'border-gray-700 hover:border-gray-600 hover:bg-gray-900/30'}`}
+            >
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".m4a,.aac,.mp4,audio/mp4,audio/aac"
-                onChange={handleFileInputChange}
+                accept=".aac,.m4a,.mp4,audio/*"
                 className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }}
               />
-
-              {/* Selected file info */}
-              {selectedFile && (
-                <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-6">
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <h4 className="font-bold mb-1">Selected File</h4>
-                      <p className="text-gray-400 text-sm break-all">{selectedFile.name}</p>
-                    </div>
-                    <button
-                      onClick={() => setSelectedFile(null)}
-                      className="text-gray-500 hover:text-red-400 transition-colors"
-                    >
-                      ✕
-                    </button>
+              {file ? (
+                <>
+                  <FileAudio size={48} className="text-emerald-500" />
+                  <div className="text-center">
+                    <p className="font-bold text-white">{file.name}</p>
+                    <p className="text-xs text-gray-400 font-mono mt-1">
+                      {(file.size / 1024 / 1024).toFixed(2)} MB · {file.type}
+                    </p>
                   </div>
-
-                  <div className="grid grid-cols-2 gap-4 mb-6 text-sm">
-                    <div>
-                      <p className="text-gray-500">Size</p>
-                      <p className="text-white font-semibold">{(selectedFile.size / (1024 * 1024)).toFixed(2)} MB</p>
-                    </div>
-                    <div>
-                      <p className="text-gray-500">Type</p>
-                      <p className="text-white font-semibold">{selectedFile.type || 'Unknown'}</p>
-                    </div>
+                  <p className="text-xs text-gray-500">Click để chọn file khác</p>
+                </>
+              ) : (
+                <>
+                  <Upload size={48} className="text-gray-600" />
+                  <div className="text-center">
+                    <p className="font-semibold text-gray-300">Kéo thả file nhạc vào đây</p>
+                    <p className="text-xs text-gray-500 mt-1">hoặc click để chọn · AAC, M4A</p>
                   </div>
-
-                  {/* Upload progress */}
-                  {isUploading && (
-                    <div className="mb-6">
-                      <div className="flex items-center justify-between mb-2">
-                        <p className="text-sm text-gray-400">Uploading...</p>
-                        <p className="text-sm font-mono text-emerald-400">{uploadProgress}%</p>
-                      </div>
-                      <div className="w-full bg-gray-800 rounded-full h-2">
-                        <div
-                          className="bg-emerald-500 h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${uploadProgress}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Upload button */}
-                  <button
-                    onClick={handleUpload}
-                    disabled={isUploading}
-                    className="w-full bg-emerald-500 text-white px-6 py-3 rounded-full font-bold hover:bg-emerald-600 transition-all duration-200 disabled:bg-gray-700 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                  >
-                    {isUploading ? (
-                      <>
-                        <Loader2 size={18} className="animate-spin" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <Upload size={18} />
-                        Upload File
-                      </>
-                    )}
-                  </button>
-                </div>
+                </>
               )}
-
-              {/* Info box */}
-              <div className="bg-blue-950/20 border border-blue-500/30 rounded-xl p-4">
-                <p className="text-blue-300 text-sm">
-                  💡 <strong>Tip:</strong> Your audio file will be encrypted and securely stored. You can play it immediately after upload.
-                </p>
-              </div>
             </div>
-          )}
+
+            {/* Error */}
+            {errorMsg && (
+              <div className="flex items-center gap-3 bg-red-950/40 border border-red-900/50 rounded-xl px-4 py-3 text-sm text-red-400 font-mono">
+                <AlertCircle size={16} className="shrink-0" />
+                {errorMsg}
+              </div>
+            )}
+
+            {/* Upload button */}
+            {file && status !== 'success' && (
+              <button
+                onClick={handleUpload}
+                disabled={status === 'uploading'}
+                className="flex items-center justify-center gap-3 w-full py-3.5 rounded-xl font-bold text-sm
+                           bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed
+                           transition-all duration-200 text-white"
+              >
+                {status === 'uploading' ? (
+                  <><Loader2 size={18} className="animate-spin" /> Đang mã hóa & upload...</>
+                ) : (
+                  <><Upload size={18} /> Upload & Encrypt</>
+                )}
+              </button>
+            )}
+
+            {/* Success result */}
+            {status === 'success' && uploadedTrack && (
+              <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-2xl p-6 flex flex-col gap-3">
+                <div className="flex items-center gap-2 text-emerald-400 font-bold">
+                  <CheckCircle2 size={20} /> Upload thành công!
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  {[
+                    ['Track ID',  uploadedTrack.id],
+                    ['Filename',  uploadedTrack.filename],
+                    ['KID',       uploadedTrack.kid],
+                    ['Duration',  fmt(uploadedTrack.duration)],
+                  ].map(([k, v]) => (
+                    <div key={k} className="col-span-2 flex gap-2">
+                      <span className="text-gray-500 w-20 shrink-0">{k}</span>
+                      <span className="text-gray-300 truncate">{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={() => { setStatus('idle'); setUploadedTrack(null); }}
+                  className="mt-2 text-xs text-emerald-400 hover:text-emerald-300 underline underline-offset-4 text-left"
+                >
+                  Upload bài khác
+                </button>
+              </div>
+            )}
+
+            {/* Uploaded list */}
+            {uploadedList.length > 0 && (
+              <div className="mt-4">
+                <p className="text-[10px] font-mono text-gray-500 uppercase tracking-widest mb-3">
+                  Đã upload ({uploadedList.length} bài)
+                </p>
+                <div className="flex flex-col gap-2">
+                  {uploadedList.map(track => (
+                    <div key={track.id}
+                      className="flex items-center gap-3 bg-[#121212] border border-gray-900 rounded-xl p-3 hover:border-gray-800 transition-colors">
+                      <div className="w-10 h-10 bg-gradient-to-br from-emerald-700 to-teal-900 rounded-lg flex items-center justify-center shrink-0">
+                        <Music2 size={18} className="text-emerald-300" />
+                      </div>
+                      <div className="flex-1 overflow-hidden">
+                        <p className="text-sm font-bold text-white truncate">{track.filename}</p>
+                        <p className="text-[10px] text-gray-500 font-mono">
+                          KID: {track.kid.substring(0, 12)}... · {fmt(track.duration)}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </div>
         </div>
       </div>
     </div>

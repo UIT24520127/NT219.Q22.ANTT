@@ -1,7 +1,8 @@
 // app/api/media/signed-url/route.ts
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import * as jose from 'jose';
 
 const r2Client = new S3Client({
   region: 'auto',
@@ -12,28 +13,70 @@ const r2Client = new S3Client({
   },
 });
 
-// Chỉ cho phép path trong bucket encrypted-audio
-const ALLOWED_PATH_REGEX = /^[a-zA-Z0-9_\-\/\.]+\.(?:mpd|m4s|mp4|mp4a|init|m4a)$/;
+const ALLOWED_PATH_REGEX =
+  /^[a-zA-Z0-9_\-\/\.]+\.(?:mpd|m4s|mp4|mp4a|init|m4a)$/;
 const PRESIGNED_URL_TTL = 300; // 5 phút
 
-export async function GET(request: Request) {
-  // ── Auth check ────────────────────────────────────────────────────────────
-  const authHeader = request.headers.get('authorization') || '';
-  if (!authHeader.toLowerCase().startsWith('bearer ')) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _jwks: ReturnType<typeof jose.createRemoteJWKSet> | null = null;
+function getJWKS() {
+  if (!_jwks) {
+    const issuer =
+      process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+    _jwks = jose.createRemoteJWKSet(
+      new URL(`${issuer}/protocol/openid-connect/certs`)
+    );
+  }
+  return _jwks;
+}
+
+async function verifyAndCheckRole(request: NextRequest): Promise<
+  | { ok: true }
+  | { ok: false; status: 401 | 403; error: string }
+> {
+  const token = request.cookies.get('access_token')?.value;
+  if (!token) {
+    return { ok: false, status: 401, error: 'Unauthorized' };
   }
 
-  // Verify JWT còn hạn (basic check — full verify nên dùng Keycloak introspect)
+  const issuer =
+    process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+
+  let payload: jose.JWTPayload;
   try {
-    const token = authHeader.slice(7);
-    const payload = JSON.parse(
-      Buffer.from(token.split('.')[1], 'base64url').toString()
-    );
-    if (payload.exp && payload.exp * 1000 < Date.now()) {
-      return NextResponse.json({ error: 'Token expired' }, { status: 401 });
-    }
+    const result = await jose.jwtVerify(token, getJWKS(), { issuer });
+    payload = result.payload;
   } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+    return { ok: false, status: 401, error: 'Invalid or expired token' };
+  }
+
+  const roles: string[] = (payload as any)?.realm_access?.roles ?? [];
+  if (!roles.includes('music_listener')) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Forbidden: role music_listener required',
+    };
+  }
+
+  return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/media/signed-url?key=<path>
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function GET(request: NextRequest) {
+  // ── Auth + Role ───────────────────────────────────────────────────────────
+  const authResult = await verifyAndCheckRole(request);
+  if (!authResult.ok) {
+    return NextResponse.json(
+      { error: authResult.error },
+      { status: authResult.status }
+    );
   }
 
   // ── Validate key param ────────────────────────────────────────────────────
@@ -47,17 +90,13 @@ export async function GET(request: Request) {
     );
   }
 
-  // Chặn path traversal + chỉ cho phép file media hợp lệ
-  const normalizedKey = key.replace(/^\/+/, ''); // strip leading slash
+  const normalizedKey = key.replace(/^\/+/, '');
   if (
     normalizedKey.includes('..') ||
     normalizedKey.includes('//') ||
     !ALLOWED_PATH_REGEX.test(normalizedKey)
   ) {
-    return NextResponse.json(
-      { error: 'Invalid key path' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: 'Invalid key path' }, { status: 400 });
   }
 
   // ── Tạo presigned URL ─────────────────────────────────────────────────────
@@ -75,12 +114,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json(
       { url: signedUrl, expiresIn: PRESIGNED_URL_TTL },
-      {
-        headers: {
-          // Không cache presigned URL trên client
-          'Cache-Control': 'no-store',
-        },
-      }
+      { headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (err: unknown) {
     console.error('❌ [SignedURL] R2 error:', err);

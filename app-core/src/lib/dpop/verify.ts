@@ -37,8 +37,8 @@ export async function verifyDPoPProof(opts: DPoPVerifyOptions): Promise<DPoPVeri
     if (protectedHeader.typ !== 'dpop+jwt') {
       return { valid: false, error: 'DPoP proof phải có typ=dpop+jwt' };
     }
-    if (protectedHeader.alg !== 'ES256') {
-      return { valid: false, error: 'Chỉ hỗ trợ alg=ES256' };
+    if (!['ES256', 'EdDSA'].includes(protectedHeader.alg ?? '')) {
+      return { valid: false, error: 'Chỉ hỗ trợ alg=ES256 hoặc EdDSA' };
     }
     if (!protectedHeader.jwk) {
       return { valid: false, error: 'Header thiếu jwk' };
@@ -47,7 +47,7 @@ export async function verifyDPoPProof(opts: DPoPVerifyOptions): Promise<DPoPVeri
     // ── 2. Import public key từ header JWK ──────────────────────────────────
     let publicKey: JoseKey;
     try {
-      publicKey = await jose.importJWK(protectedHeader.jwk as jose.JWK, 'ES256') as JoseKey;
+      publicKey = await jose.importJWK(protectedHeader.jwk as jose.JWK, protectedHeader.alg === 'EdDSA' ? 'EdDSA' : 'ES256') as JoseKey;
     } catch {
       return { valid: false, error: 'JWK trong header không hợp lệ' };
     }
@@ -57,7 +57,7 @@ export async function verifyDPoPProof(opts: DPoPVerifyOptions): Promise<DPoPVeri
     try {
       const result = await jose.jwtVerify(proof, publicKey, {
         typ: 'dpop+jwt',
-        algorithms: ['ES256'],
+        algorithms: ['ES256', 'EdDSA'],
       });
       payload = result.payload;
     } catch (err: any) {
