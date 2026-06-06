@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ShieldCheck, User, Lock, AlertCircle, Loader2 } from 'lucide-react';
-import { getCurrentUser, getRoleFromPayload, getRedirectByRole } from '@/lib/auth/token';
+import { getRoleFromPayload, getRedirectByRole } from '@/lib/auth/token';
 
 function LoginInner() {
   const router       = useRouter();
@@ -14,15 +14,17 @@ function LoginInner() {
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState<string | null>(null);
 
-  // Nếu đã có cookie hợp lệ → redirect luôn
+  // Nếu đã có cookie hợp lệ → redirect luôn (không auto-refresh, tránh loop)
   useEffect(() => {
-    getCurrentUser().then(user => {
-      if (!user) return;
-      const role     = getRoleFromPayload(user);
-      const returnTo = searchParams.get('returnTo') || getRedirectByRole(role);
-      router.replace(returnTo);
-    });
-  }, [router, searchParams]);
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(user => {
+        if (!user) return;
+        const role     = getRoleFromPayload(user);
+        const returnTo = searchParams.get('returnTo') || getRedirectByRole(role);
+        router.replace(returnTo);
+      });
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

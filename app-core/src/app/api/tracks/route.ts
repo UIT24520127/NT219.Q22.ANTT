@@ -1,36 +1,17 @@
 // app/api/tracks/route.ts
-// Trả danh sách tracks — yêu cầu đăng nhập (cả 2 role đều xem được).
+// Public — trả danh sách tracks (tên, KID, duration).
+// Audio thật được bảo vệ bởi /api/media/proxy (auth) + /api/license (DPoP).
 export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
-import * as jose from 'jose';
 import {
   getTrackById,
   getAllTracks,
   getActiveManifest,
 } from '@/lib/track-db';
 
-let _jwks: ReturnType<typeof jose.createRemoteJWKSet> | null = null;
-function getJWKS() {
-  if (!_jwks) {
-    const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
-    _jwks = jose.createRemoteJWKSet(new URL(`${issuer}/protocol/openid-connect/certs`));
-  }
-  return _jwks;
-}
-
 // ── GET /api/tracks ───────────────────────────────────────────────────────────
 export async function GET(request: NextRequest) {
-  // ── Auth ────────────────────────────────────────────────────────────────────
-  const token = request.cookies.get('access_token')?.value;
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  try {
-    const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
-    await jose.jwtVerify(token, getJWKS(), { issuer });
-  } catch {
-    return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
-  }
-
   try {
     const trackId = request.nextUrl.searchParams.get('trackId');
 
