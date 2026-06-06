@@ -24,15 +24,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // KEYCLOAK_PUBLIC_ISSUER = public URL khớp với iss claim trong token
-    // (KC_HOSTNAME trên VPS → iss = https://domain/realms/...)
-    const jwksIssuer  = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
-    const claimIssuer = process.env.KEYCLOAK_PUBLIC_ISSUER || jwksIssuer;
-
-    const { payload } = await jose.jwtVerify(token, getJWKS(), {
-      issuer: claimIssuer,
-      // Không check audience vì frontend-client là public client
-    });
+    const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+    const { payload } = await jose.jwtVerify(token, getJWKS(), { issuer });
 
     return NextResponse.json(payload, {
       headers: { 'Cache-Control': 'no-store' },

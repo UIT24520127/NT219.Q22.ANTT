@@ -20,10 +20,9 @@ function getJWKS(jwksIssuer: string) {
 }
 
 async function verifyToken(token: string): Promise<string[]> {
-  const jwksIssuer  = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
-  const claimIssuer = process.env.KEYCLOAK_PUBLIC_ISSUER || jwksIssuer;
+  const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
   try {
-    const { payload } = await jose.jwtVerify(token, getJWKS(jwksIssuer), { issuer: claimIssuer });
+    const { payload } = await jose.jwtVerify(token, getJWKS(issuer), { issuer });
     const roles = (payload as any)?.realm_access?.roles ?? [];
     return roles;
   } catch {
