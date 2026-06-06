@@ -81,7 +81,8 @@ services:
       BAO_DEV_ROOT_TOKEN_ID: ${BAO_PRODUCTION_TOKEN}
       KMS_TRANSIT_KEY_NAME: "music-app-key"
 
-      KEYCLOAK_ISSUER: "http://keycloak:8080/realms/drm-realm"   # internal docker — giữ nguyên
+      KEYCLOAK_ISSUER: "http://keycloak:8080/realms/drm-realm"          # internal — dùng để fetch JWKS
+      KEYCLOAK_PUBLIC_ISSUER: "https://${DOMAIN}/realms/drm-realm"     # public — khớp iss claim trong token
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
       KEYCLOAK_SECRET: ${KEYCLOAK_SECRET}
       KEYCLOAK_FRONTEND_CLIENT_ID: "frontend-client"

@@ -1,4 +1,4 @@
-// middleware.ts — đặt ở app-core/middleware.ts (cùng cấp với app/)
+// middleware.ts — đặt ở src/middleware.ts (cùng cấp với app/)
 import { NextRequest, NextResponse } from 'next/server';
 import * as jose from 'jose';
 
@@ -10,18 +10,20 @@ const ROUTE_RULES: Record<string, string[]> = {
 
 // Cache JWKS
 let _jwks: ReturnType<typeof jose.createRemoteJWKSet> | null = null;
-function getJWKS(issuer: string) {
+function getJWKS(jwksIssuer: string) {
   if (!_jwks) {
     _jwks = jose.createRemoteJWKSet(
-      new URL(`${issuer}/protocol/openid-connect/certs`)
+      new URL(`${jwksIssuer}/protocol/openid-connect/certs`)
     );
   }
   return _jwks;
 }
 
-async function verifyToken(token: string, issuer: string): Promise<string[]> {
+async function verifyToken(token: string): Promise<string[]> {
+  const jwksIssuer  = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+  const claimIssuer = process.env.KEYCLOAK_PUBLIC_ISSUER || jwksIssuer;
   try {
-    const { payload } = await jose.jwtVerify(token, getJWKS(issuer), { issuer });
+    const { payload } = await jose.jwtVerify(token, getJWKS(jwksIssuer), { issuer: claimIssuer });
     const roles = (payload as any)?.realm_access?.roles ?? [];
     return roles;
   } catch {
@@ -41,7 +43,6 @@ export async function middleware(req: NextRequest) {
 
   const requiredRoles = ROUTE_RULES[matchedRoute];
   const token         = req.cookies.get('access_token')?.value;
-  const issuer        = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
 
   // Chưa đăng nhập
   if (!token) {
@@ -51,12 +52,10 @@ export async function middleware(req: NextRequest) {
   }
 
   // Verify và lấy roles
-  const userRoles = await verifyToken(token, issuer);
+  const userRoles = await verifyToken(token);
 
   // Token hết hạn (roles rỗng do verify thất bại)
   if (userRoles.length === 0) {
-    // Thử redirect về /api/auth/refresh không được từ middleware
-    // → Về login, client sẽ tự refresh
     const loginUrl = new URL('/login', req.url);
     loginUrl.searchParams.set('returnTo', pathname);
     loginUrl.searchParams.set('reason', 'expired');

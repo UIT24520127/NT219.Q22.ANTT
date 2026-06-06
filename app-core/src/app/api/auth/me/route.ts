@@ -7,9 +7,10 @@ let jwksCache: ReturnType<typeof jose.createRemoteJWKSet> | null = null;
 
 function getJWKS() {
   if (!jwksCache) {
-    const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+    // Internal URL để fetch JWKS (docker network)
+    const jwksIssuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
     jwksCache = jose.createRemoteJWKSet(
-      new URL(`${issuer}/protocol/openid-connect/certs`)
+      new URL(`${jwksIssuer}/protocol/openid-connect/certs`)
     );
   }
   return jwksCache;
@@ -23,10 +24,13 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const issuer = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+    // KEYCLOAK_PUBLIC_ISSUER = public URL khớp với iss claim trong token
+    // (KC_HOSTNAME trên VPS → iss = https://domain/realms/...)
+    const jwksIssuer  = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/drm-realm';
+    const claimIssuer = process.env.KEYCLOAK_PUBLIC_ISSUER || jwksIssuer;
 
     const { payload } = await jose.jwtVerify(token, getJWKS(), {
-      issuer,
+      issuer: claimIssuer,
       // Không check audience vì frontend-client là public client
     });
 
