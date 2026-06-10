@@ -56,16 +56,20 @@ export function getRedirectByRole(role: string | null): string {
 }
 
 // ── Trigger refresh — server tự đọc refresh_token cookie ─────────────────────
+// Singleton promise: nếu có N request đồng thời cùng trigger refresh,
+// chỉ 1 call thực sự được gửi đến Keycloak (tránh rotating-token revocation).
+let _refreshPromise: Promise<boolean> | null = null;
+
 export async function refreshAccessToken(): Promise<boolean> {
-  try {
-    const res = await fetch('/api/auth/refresh', {
-      method: 'POST',
-      credentials: 'include',
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = fetch('/api/auth/refresh', {
+    method: 'POST',
+    credentials: 'include',
+  })
+    .then(res => res.ok)
+    .catch(() => false)
+    .finally(() => { _refreshPromise = null; });
+  return _refreshPromise;
 }
 
 // ── Logout — server xóa cookie ────────────────────────────────────────────────

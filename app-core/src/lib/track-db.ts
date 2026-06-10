@@ -1,11 +1,13 @@
 import db from './db';
 import { kmsService, generateKID, generateCEK } from './kms/bao';
 import { v4 as uuidv4 } from 'uuid';
-import type { Track, DASHManifest, AuditLog } from './types';
+import type { Track, DASHManifest } from './types';
 
 export const createTrack = async (
   filename: string,
-  sourceFormat: string = 'AAC'
+  sourceFormat: string = 'AAC',
+  title?: string,
+  uploaderId?: string,
 ): Promise<{ trackId: string; kid: string; encrypted_cek: string }> => {
   try {
     const trackId = uuidv4();
@@ -13,15 +15,16 @@ export const createTrack = async (
     const cek = generateCEK();
     console.log(`🔐 [DB] Encrypting CEK for track ${trackId}...`);
     const encrypted_cek = await kmsService.encryptKey(cek);
-    const query = `INSERT INTO tracks (id, filename, kid, encrypted_cek, source_format) VALUES (?, ?, ?, ?, ?)`;
+    const resolvedTitle = title ?? filename.replace(/\.[^.]+$/, '');
+    const query = `INSERT INTO tracks (id, filename, title, uploader_id, kid, encrypted_cek, source_format) VALUES (?, ?, ?, ?, ?, ?, ?)`;
     try {
-      await db.query(query, [trackId, filename, kid, encrypted_cek, sourceFormat]);
+      await db.query(query, [trackId, filename, resolvedTitle, uploaderId ?? null, kid, encrypted_cek, sourceFormat]);
       console.log(`✅ [DB] Track created: ${trackId} with KID: ${kid}`);
       return { trackId, kid, encrypted_cek };
     } catch (dbError: any) {
       if (dbError.code === 'ER_DUP_ENTRY' && dbError.message?.includes('kid')) {
         console.error('❌ [DB] KID collision, retrying...');
-        return createTrack(filename, sourceFormat);
+        return createTrack(filename, sourceFormat, title, uploaderId);
       }
       throw dbError;
     }
@@ -61,7 +64,7 @@ export const getTrackById = async (trackId: string): Promise<Track | null> => {
 export const getAllTracks = async (): Promise<Track[]> => {
   try {
     const [rows]: any = await db.query(
-      'SELECT id, filename, kid, source_format, duration, created_at FROM tracks ORDER BY created_at DESC'
+      'SELECT id, filename, title, uploader_id, kid, source_format, duration, created_at FROM tracks ORDER BY created_at DESC'
     );
     console.log(`✅ [DB] Fetched ${rows.length} tracks`);
     return rows as Track[];
@@ -134,5 +137,28 @@ export const deactivateOldManifests = async (trackId: string): Promise<void> => 
     console.log(`📝 [DB] Deactivated old manifests for track ${trackId}`);
   } catch (error: any) {
     console.error('❌ [DB] Error deactivating manifests:', error.message);
+  }
+};
+
+// Payload từ audiowmark là trackId không có dấu gạch ngang (32 hex chars).
+// Hàm này chuyển lại thành UUID và tra cứu.
+export const getTrackByWatermarkPayload = async (payload: string): Promise<Track | null> => {
+  const trackId = [
+    payload.slice(0, 8),
+    payload.slice(8, 12),
+    payload.slice(12, 16),
+    payload.slice(16, 20),
+    payload.slice(20, 32),
+  ].join('-');
+  try {
+    const [rows]: any = await db.query(
+      'SELECT id, filename, title, uploader_id, kid, created_at FROM tracks WHERE id = ?',
+      [trackId],
+    );
+    if (rows.length === 0) return null;
+    return rows[0] as Track;
+  } catch (error: any) {
+    console.error('❌ [DB] Error in getTrackByWatermarkPayload:', error.message);
+    throw error;
   }
 };

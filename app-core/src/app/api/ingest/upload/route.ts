@@ -78,7 +78,7 @@ const validateAudioFile = (filename: string, buffer: Buffer): boolean => {
   return true;
 };
 
-const extractAudioFile = async (request: NextRequest): Promise<{ filename: string; buffer: Buffer } | null> => {
+const extractAudioFile = async (request: NextRequest): Promise<{ filename: string; buffer: Buffer; title?: string } | null> => {
   try {
     const contentType = request.headers.get('content-type');
     if (contentType?.includes('multipart/form-data')) {
@@ -86,11 +86,13 @@ const extractAudioFile = async (request: NextRequest): Promise<{ filename: strin
       // Hỗ trợ cả 'audio' và 'file' field name
       const file = (formData.get('audio') || formData.get('file')) as File | null;
       if (!file) { console.error('❌ [Upload] No audio file in form data'); return null; }
-      return { filename: file.name, buffer: Buffer.from(await file.arrayBuffer()) };
+      const title = (formData.get('title') as string | null) || undefined;
+      return { filename: file.name, buffer: Buffer.from(await file.arrayBuffer()), title };
     } else if (contentType?.includes('application/octet-stream')) {
       const buffer = Buffer.from(await request.arrayBuffer());
       const filename = request.headers.get('x-filename') || `audio-${uuidv4()}.m4a`;
-      return { filename, buffer };
+      const title = request.headers.get('x-title') || undefined;
+      return { filename, buffer, title };
     }
     console.error('❌ [Upload] Unsupported content type:', contentType);
     return null;
@@ -184,7 +186,7 @@ export async function POST(request: NextRequest) {
     writeFileSync(tempFilePath, audioFile.buffer);
 
     const sourceFormat = path.extname(audioFile.filename).slice(1).toUpperCase();
-    const trackData    = await createTrack(audioFile.filename, sourceFormat);
+    const trackData    = await createTrack(audioFile.filename, sourceFormat, audioFile.title, userId!);
     trackId            = trackData.trackId;
     const { kid, encrypted_cek } = trackData;
 

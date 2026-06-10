@@ -26,11 +26,6 @@ async function getSigningKeys(): Promise<{ priv: CryptoKey; pub: CryptoKey }> {
 }
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
-import {
-  licenseIssued,
-  licenseFailed,
-  licenseProcessingDuration,
-} from '@/lib/metrics';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -122,14 +117,11 @@ const extractKIDFromChallenge = (challengeBuffer: Buffer): string | null => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
-  const timer = licenseProcessingDuration.startTimer();
-
   try {
     // ── Bước 1: Access token từ HttpOnly cookie ───────────────────────────
     const rawAccessToken = request.cookies.get('access_token')?.value;
     if (!rawAccessToken) {
-      licenseFailed.inc({ reason: 'missing_bearer', error_type: 'auth' });
-      console.error('❌ [License] Thiếu auth cookie');
+console.error('❌ [License] Thiếu auth cookie');
       return NextResponse.json(
         { error: 'Unauthorized: Missing auth cookie' },
         { status: 401 }
@@ -147,8 +139,7 @@ export async function POST(request: NextRequest) {
         (tokenPayload as any).email ||
         'anonymous';
     } catch (err: any) {
-      licenseFailed.inc({ reason: 'invalid_token', error_type: 'auth' });
-      console.error(`❌ [License] JWT verify thất bại: ${err.message}`);
+console.error(`❌ [License] JWT verify thất bại: ${err.message}`);
       await logAuditEvent(
         'LICENSE_FAILED',
         undefined,
@@ -164,8 +155,7 @@ export async function POST(request: NextRequest) {
 
     // ── Bước 3: Kiểm tra role music_listener ────────────────────────────
     if (!hasListenerRole(tokenPayload)) {
-      licenseFailed.inc({ reason: 'forbidden_role', error_type: 'authz' });
-      console.warn(
+console.warn(
         `🚫 [License] User ${userId} không có role music_listener`
       );
       await logAuditEvent(
@@ -187,8 +177,7 @@ export async function POST(request: NextRequest) {
     // ── Bước 4: Rate limiting ────────────────────────────────────────────
     const { success, limit, remaining } = await ratelimit.limit(userId);
     if (!success) {
-      licenseFailed.inc({ reason: 'rate_limited', error_type: 'auth' });
-      console.warn(`⚠️  [License] Rate limit hit cho user: ${userId}`);
+console.warn(`⚠️  [License] Rate limit hit cho user: ${userId}`);
       await logAuditEvent(
         'LICENSE_FAILED',
         undefined,
@@ -212,8 +201,7 @@ export async function POST(request: NextRequest) {
     // ── Bước 5: DPoP proof ───────────────────────────────────────────────
     const dpopHeader = request.headers.get('dpop');
     if (!dpopHeader) {
-      licenseFailed.inc({ reason: 'missing_dpop', error_type: 'auth' });
-      console.error('❌ [License] Thiếu DPoP header');
+console.error('❌ [License] Thiếu DPoP header');
       return NextResponse.json(
         { error: 'DPoP proof required', hint: 'Thêm header DPoP: <proof_jwt>' },
         {
@@ -232,8 +220,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (!dpopResult.valid) {
-      licenseFailed.inc({ reason: 'invalid_dpop', error_type: 'auth' });
-      console.error(`❌ [License] DPoP verify thất bại: ${dpopResult.error}`);
+console.error(`❌ [License] DPoP verify thất bại: ${dpopResult.error}`);
       await logAuditEvent(
         'LICENSE_FAILED',
         undefined,
@@ -268,8 +255,7 @@ export async function POST(request: NextRequest) {
       if (kid) console.log(`ℹ️  [License] KID từ header: ${kid}`);
     }
     if (!kid) {
-      licenseFailed.inc({ reason: 'missing_kid', error_type: 'validation' });
-      console.error('❌ [License] Không có KID');
+console.error('❌ [License] Không có KID');
       return NextResponse.json(
         { error: 'No KID provided in challenge or headers' },
         { status: 400 }
@@ -279,8 +265,7 @@ export async function POST(request: NextRequest) {
     // ── Bước 7: ECDH client key ──────────────────────────────────────────
     const clientPublicKeyHex = request.headers.get('x-client-public-key');
     if (!clientPublicKeyHex) {
-      licenseFailed.inc({ reason: 'missing_client_key', error_type: 'ecdh' });
-      return NextResponse.json(
+return NextResponse.json(
         { error: 'ECDH Handshake Required: Missing client public key' },
         { status: 400 }
       );
@@ -290,8 +275,7 @@ export async function POST(request: NextRequest) {
     console.log(`🔍 [License] Lookup CEK cho KID: ${kid}`);
     const encryptedCek = await getEncryptedCEKByKID(kid);
     if (!encryptedCek) {
-      licenseFailed.inc({ reason: 'cek_not_found', error_type: 'database' });
-      await logAuditEvent(
+await logAuditEvent(
         'LICENSE_FAILED',
         undefined,
         kid,
@@ -367,9 +351,6 @@ export async function POST(request: NextRequest) {
     );
     await logAuditEvent('LICENSE_ISSUED', undefined, kid, userId, 'license');
 
-    licenseIssued.inc({ kid });
-    timer({ kid });
-
     return new NextResponse(finalLicenseBuffer, {
       headers: {
         'Content-Type':                  'application/octet-stream',
@@ -382,7 +363,6 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error: unknown) {
-    timer({});
     console.error('💥 [License CRITICAL ERROR]');
     if (error instanceof Error) {
       console.error('Chi tiết:', error.message);

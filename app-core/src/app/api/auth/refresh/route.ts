@@ -15,7 +15,11 @@ export async function POST(req: NextRequest) {
     const tokenEndpoint = `${issuerUrl}/protocol/openid-connect/token`;
 
     // ── DPoP proof ────────────────────────────────────────────────────────
-    const raw        = process.env.KEYCLOAK_DPOP_PRIVATE_JWK!;
+    const raw = process.env.KEYCLOAK_DPOP_PRIVATE_JWK;
+    if (!raw) {
+      console.error('[Refresh] KEYCLOAK_DPOP_PRIVATE_JWK chưa được cấu hình');
+      return NextResponse.json({ error: 'Server configuration error' }, { status: 500 });
+    }
     const privateJwk = JSON.parse(raw);
     const { d, ...rest } = privateJwk;
     const publicJwk  = { ...rest, alg: 'ES256', use: 'sig' };

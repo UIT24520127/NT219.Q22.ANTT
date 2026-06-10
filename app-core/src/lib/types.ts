@@ -6,6 +6,8 @@
 export interface Track {
   id: string;
   filename: string;
+  title?: string;
+  uploader_id?: string;
   kid: string;
   encrypted_cek: string;
   source_format: string;
